@@ -56,8 +56,8 @@ const orderSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ['OPEN', 'COMPLETED', 'CANCELLED'],
-      default: 'COMPLETED',
+      enum: ['UNPROCESSED', 'PENDING', 'READY', 'COMPLETED', 'CANCELLED'],
+      default: 'UNPROCESSED',
     },
     items: [orderItemSchema],
     subtotal: {

@@ -6,14 +6,37 @@ const { protect, requireRole, requireRestaurant, requireActiveSubscription } = r
 
 const router = express.Router();
 
-router.use(protect, requireRole('staff', 'restaurant_admin'), requireRestaurant, requireActiveSubscription);
+router.use(protect, requireRole('staff', 'restaurant_admin', 'admin', 'cashier', 'manager', 'product_manager', 'kitchen_staff'), requireRestaurant, requireActiveSubscription);
 
-const generateOrderNumber = () => {
+/**
+ * Generate a sequential order number: ORD-YYYYMMDD-0001, 0002, etc.
+ * Resets to 0001 each new day per restaurant.
+ */
+const generateOrderNumber = async (restaurantId) => {
   const now = new Date();
-  return `ORD-${now.getFullYear()}${(now.getMonth() + 1).toString().padStart(2, '0')}${now
-    .getDate()
+  const dateStr = `${now.getFullYear()}${(now.getMonth() + 1)
     .toString()
-    .padStart(2, '0')}-${now.getTime().toString().slice(-6)}`;
+    .padStart(2, '0')}${now.getDate().toString().padStart(2, '0')}`;
+  const prefix = `ORD-${dateStr}-`;
+
+  // Find the last order for this restaurant with today's date prefix
+  const lastOrder = await Order.findOne({
+    restaurant: restaurantId,
+    orderNumber: { $regex: `^${prefix}` },
+  })
+    .sort({ orderNumber: -1 })
+    .select('orderNumber')
+    .lean();
+
+  let nextSeq = 1;
+  if (lastOrder && lastOrder.orderNumber) {
+    const lastSeq = parseInt(lastOrder.orderNumber.split('-').pop(), 10);
+    if (!isNaN(lastSeq)) {
+      nextSeq = lastSeq + 1;
+    }
+  }
+
+  return `${prefix}${nextSeq.toString().padStart(4, '0')}`;
 };
 
 // @route   POST /api/pos/orders
@@ -125,12 +148,12 @@ router.post('/orders', async (req, res, next) => {
       createdBy: req.user.id,
       orderType,
       paymentMethod,
-      status: 'COMPLETED',
+      status: 'UNPROCESSED',
       items: orderItems,
       subtotal,
       discountAmount: discount,
       total,
-      orderNumber: generateOrderNumber(),
+      orderNumber: await generateOrderNumber(req.restaurant._id),
     });
 
     res.status(201).json({
@@ -156,7 +179,7 @@ router.post('/orders/:id/cancel', async (req, res, next) => {
     const order = await Order.findOne({
       _id: id,
       restaurant: req.restaurant._id,
-      status: { $in: ['COMPLETED'] },
+      status: { $in: ['UNPROCESSED', 'PENDING', 'READY', 'COMPLETED'] },
     });
 
     if (!order) {

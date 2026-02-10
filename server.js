@@ -14,6 +14,7 @@ const customerRoutes = require('./routes/customerRoutes');
 const adminRoutes = require('./routes/adminRoutes');
 const superAdminRoutes = require('./routes/superAdminRoutes');
 const posRoutes = require('./routes/posRoutes');
+const uploadRoutes = require('./routes/uploadRoutes');
 
 const app = express();
 
@@ -28,6 +29,7 @@ app.use('/api', customerRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/super', superAdminRoutes);
 app.use('/api/pos', posRoutes);
+app.use('/api/upload', uploadRoutes);
 
 // Health check
 app.get('/health', (req, res) => {

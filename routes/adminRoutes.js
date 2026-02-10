@@ -68,6 +68,10 @@ const mapMenuItem = (item) => ({
   categoryId: item.category.toString(),
   available: item.available,
   showOnWebsite: item.showOnWebsite,
+  imageUrl: item.imageUrl || '',
+  description: item.description || '',
+  isFeatured: item.isFeatured || false,
+  isBestSeller: item.isBestSeller || false,
   inventoryConsumptions: (item.inventoryConsumptions || []).map((c) => ({
     inventoryItem: c.inventoryItem.toString(),
     quantity: c.quantity,
@@ -80,6 +84,35 @@ const mapUser = (user) => ({
   email: user.email,
   role: user.role,
   createdAt: user.createdAt.toISOString(),
+});
+
+const mapOrder = (order) => ({
+  id: order.orderNumber || order._id.toString(),
+  _id: order._id.toString(),
+  customerName:
+    order.createdBy && typeof order.createdBy === 'object' && order.createdBy.name
+      ? order.createdBy.name
+      : 'Walk‑in Customer',
+  total: order.total,
+  subtotal: order.subtotal,
+  discountAmount: order.discountAmount || 0,
+  status: order.status,
+  createdAt: order.createdAt,
+  items: (order.items || []).map((i) => ({
+    name: i.name,
+    qty: i.quantity,
+    unitPrice: i.unitPrice,
+    lineTotal: i.lineTotal,
+  })),
+  type:
+    order.orderType === 'DINE_IN'
+      ? 'dine-in'
+      : order.orderType === 'TAKEAWAY'
+      ? 'takeaway'
+      : 'dine-in',
+  source: 'POS',
+  paymentMethod: order.paymentMethod === 'CARD' ? 'Card' : 'Cash',
+  paymentStatus: order.status === 'COMPLETED' ? 'PAID' : 'UNPAID',
 });
 
 // @route   GET /api/admin/menu
@@ -98,6 +131,63 @@ router.get('/menu', async (req, res, next) => {
       categories: categories.map(mapCategory),
       items: items.map(mapMenuItem),
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @route   GET /api/admin/orders
+// @desc    List recent orders for this restaurant
+// @access  Restaurant Admin / Staff / Super Admin
+router.get('/orders', async (req, res, next) => {
+  try {
+    const restaurantId = getRestaurantIdForRequest(req);
+
+    const query = { restaurant: restaurantId };
+    if (req.query.status) {
+      query.status = req.query.status;
+    }
+
+    const orders = await Order.find(query)
+      .populate('createdBy', 'name')
+      .sort({ createdAt: -1 })
+      .limit(200);
+
+    res.json(orders.map(mapOrder));
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @route   PUT /api/admin/orders/:id/status
+// @desc    Update order status
+// @access  Restaurant Admin / Staff / Super Admin
+router.put('/orders/:id/status', async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+    const restaurantId = getRestaurantIdForRequest(req);
+
+    if (!['UNPROCESSED', 'PENDING', 'READY', 'COMPLETED', 'CANCELLED'].includes(status)) {
+      return res.status(400).json({ message: 'Invalid status' });
+    }
+
+    // Try finding by _id first, then by orderNumber
+    let order;
+    if (id.match(/^[0-9a-fA-F]{24}$/)) {
+      order = await Order.findOne({ _id: id, restaurant: restaurantId }).populate('createdBy', 'name');
+    }
+    if (!order) {
+      order = await Order.findOne({ orderNumber: id, restaurant: restaurantId }).populate('createdBy', 'name');
+    }
+    if (!order) {
+      return res.status(404).json({ message: 'Order not found' });
+    }
+
+    order.status = status;
+    await order.save();
+
+    res.json(mapOrder(order));
   } catch (error) {
     next(error);
   }
