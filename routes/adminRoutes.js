@@ -137,6 +137,31 @@ const mapOrder = (order) => {
   };
 };
 
+/**
+ * Check whether a menu item has sufficient inventory for at least one sale.
+ * Returns { sufficient: boolean, insufficientItems: string[] }
+ */
+function checkInventorySufficiency(menuItem, inventoryMap) {
+  const insufficientItems = [];
+  if (!menuItem.inventoryConsumptions || menuItem.inventoryConsumptions.length === 0) {
+    return { sufficient: true, insufficientItems };
+  }
+  for (const consumption of menuItem.inventoryConsumptions) {
+    const invId = consumption.inventoryItem ? consumption.inventoryItem.toString() : null;
+    if (!invId) continue;
+    const inv = inventoryMap.get(invId);
+    if (!inv) {
+      insufficientItems.push('Unknown ingredient');
+      continue;
+    }
+    const needed = consumption.quantity || 0;
+    if (needed > 0 && inv.currentStock < needed) {
+      insufficientItems.push(inv.name);
+    }
+  }
+  return { sufficient: insufficientItems.length === 0, insufficientItems };
+}
+
 // @route   GET /api/admin/menu
 // @desc    Get all categories and menu items for a restaurant
 // @access  Restaurant Admin / Super Admin
@@ -144,14 +169,32 @@ router.get('/menu', async (req, res, next) => {
   try {
     const restaurantId = getRestaurantIdForRequest(req);
 
-    const [categories, items] = await Promise.all([
+    const [categories, items, inventoryItems] = await Promise.all([
       Category.find({ restaurant: restaurantId }).sort({ createdAt: 1 }),
       MenuItem.find({ restaurant: restaurantId }),
+      InventoryItem.find({ restaurant: restaurantId }),
     ]);
+
+    // Build inventory lookup map
+    const inventoryMap = new Map();
+    for (const inv of inventoryItems) {
+      inventoryMap.set(inv._id.toString(), inv);
+    }
+
+    // Map items with inventory sufficiency info
+    const mappedItems = items.map((item) => {
+      const base = mapMenuItem(item);
+      const { sufficient, insufficientItems } = checkInventorySufficiency(item, inventoryMap);
+      return {
+        ...base,
+        inventorySufficient: sufficient,
+        insufficientIngredients: insufficientItems,
+      };
+    });
 
     res.json({
       categories: categories.map(mapCategory),
-      items: items.map(mapMenuItem),
+      items: mappedItems,
     });
   } catch (error) {
     next(error);

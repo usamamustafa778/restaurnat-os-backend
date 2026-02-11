@@ -1,6 +1,7 @@
 const express = require('express');
 const Category = require('../models/Category');
 const MenuItem = require('../models/MenuItem');
+const InventoryItem = require('../models/InventoryItem');
 const Restaurant = require('../models/Restaurant');
 const Order = require('../models/Order');
 
@@ -47,10 +48,33 @@ router.get('/menu', async (req, res, next) => {
       return res.status(403).json({ message: 'Restaurant website is not public' });
     }
 
-    const [categories, items] = await Promise.all([
+    const [categories, allItems, inventoryItems] = await Promise.all([
       Category.find({ restaurant: restaurant._id, isActive: true }).sort({ createdAt: 1 }),
       MenuItem.find({ restaurant: restaurant._id, available: true, showOnWebsite: true }).populate('category'),
+      InventoryItem.find({ restaurant: restaurant._id }),
     ]);
+
+    // Build inventory lookup for sufficiency check
+    const inventoryMap = new Map();
+    for (const inv of inventoryItems) {
+      inventoryMap.set(inv._id.toString(), inv);
+    }
+
+    // Filter out items with insufficient inventory
+    function hasEnoughInventory(menuItem) {
+      if (!menuItem.inventoryConsumptions || menuItem.inventoryConsumptions.length === 0) return true;
+      for (const consumption of menuItem.inventoryConsumptions) {
+        const invId = consumption.inventoryItem ? consumption.inventoryItem.toString() : null;
+        if (!invId) continue;
+        const inv = inventoryMap.get(invId);
+        if (!inv) continue;
+        const needed = consumption.quantity || 0;
+        if (needed > 0 && inv.currentStock < needed) return false;
+      }
+      return true;
+    }
+
+    const items = allItems.filter(hasEnoughInventory);
 
     // Populate website sections with full menu item data
     const rawSections = restaurant.website?.websiteSections || [];
@@ -65,10 +89,13 @@ router.get('/menu', async (req, res, next) => {
         showOnWebsite: true,
       }).populate('category');
 
+      // Also filter section items by inventory sufficiency
+      const filteredSectionItems = sectionItems.filter(hasEnoughInventory);
+
       websiteSections.push({
         title: section.title || '',
         subtitle: section.subtitle || '',
-        items: sectionItems.map((item) => ({
+        items: filteredSectionItems.map((item) => ({
           id: item._id.toString(),
           name: item.name,
           description: item.description || item.category?.description || '',
