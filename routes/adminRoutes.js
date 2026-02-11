@@ -100,7 +100,7 @@ const mapOrder = (order) => {
     customerName = order.createdBy.name;
   }
   if (!customerName) {
-    customerName = order.source === 'FOODPANDA' ? 'Foodpanda Customer' : 'Walk‑in Customer';
+    customerName = order.source === 'FOODPANDA' ? 'Foodpanda Customer' : 'Walk\u2011in Customer';
   }
 
   const paymentLabels = { CASH: 'Cash', CARD: 'Card', ONLINE: 'Online', OTHER: 'Other' };
@@ -458,6 +458,7 @@ router.get('/inventory', async (req, res, next) => {
         unit: i.unit,
         currentStock: i.currentStock,
         lowStockThreshold: i.lowStockThreshold,
+        costPrice: i.costPrice || 0,
       }))
     );
   } catch (error) {
@@ -470,7 +471,7 @@ router.get('/inventory', async (req, res, next) => {
 // @access  Restaurant Admin / Super Admin
 router.post('/inventory', async (req, res, next) => {
   try {
-    const { name, unit, initialStock, lowStockThreshold } = req.body;
+    const { name, unit, initialStock, lowStockThreshold, costPrice } = req.body;
     const restaurantId = getRestaurantIdForRequest(req);
 
     if (!name || !unit) {
@@ -492,6 +493,7 @@ router.post('/inventory', async (req, res, next) => {
       unit,
       currentStock: initialStock ?? 0,
       lowStockThreshold: lowStockThreshold ?? 0,
+      costPrice: costPrice ?? 0,
     });
 
     res.status(201).json({
@@ -500,6 +502,7 @@ router.post('/inventory', async (req, res, next) => {
       unit: item.unit,
       currentStock: item.currentStock,
       lowStockThreshold: item.lowStockThreshold,
+      costPrice: item.costPrice || 0,
     });
   } catch (error) {
     next(error);
@@ -512,7 +515,7 @@ router.post('/inventory', async (req, res, next) => {
 router.put('/inventory/:id', async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { name, unit, lowStockThreshold, stockAdjustment } = req.body;
+    const { name, unit, lowStockThreshold, stockAdjustment, costPrice } = req.body;
     const restaurantId = getRestaurantIdForRequest(req);
 
     const item = await InventoryItem.findOne({ _id: id, restaurant: restaurantId });
@@ -534,6 +537,7 @@ router.put('/inventory/:id', async (req, res, next) => {
     }
     if (unit !== undefined) item.unit = unit;
     if (lowStockThreshold !== undefined) item.lowStockThreshold = lowStockThreshold;
+    if (costPrice !== undefined) item.costPrice = costPrice;
     if (stockAdjustment !== undefined) {
       const adj = Number(stockAdjustment) || 0;
       item.currentStock = Math.max(0, item.currentStock + adj);
@@ -547,6 +551,7 @@ router.put('/inventory/:id', async (req, res, next) => {
       unit: item.unit,
       currentStock: item.currentStock,
       lowStockThreshold: item.lowStockThreshold,
+      costPrice: item.costPrice || 0,
     });
   } catch (error) {
     next(error);
@@ -653,6 +658,28 @@ router.put('/website', async (req, res, next) => {
 
 // REPORTING & DASHBOARD ROUTES
 
+// Helper: compute cost of a single menu item based on its inventory consumptions
+// costPrice is stored per bulk unit: per 1000g, per 1000ml, per 12 pieces
+function computeItemCost(menuItem, inventoryMap) {
+  if (!menuItem.inventoryConsumptions || menuItem.inventoryConsumptions.length === 0) return 0;
+  let cost = 0;
+  for (const consumption of menuItem.inventoryConsumptions) {
+    const invId = consumption.inventoryItem ? consumption.inventoryItem.toString() : null;
+    if (!invId) continue;
+    const inv = inventoryMap.get(invId);
+    if (!inv || !inv.costPrice) continue;
+    const qty = consumption.quantity || 0;
+    if (inv.unit === 'gram' || inv.unit === 'kg') {
+      cost += (qty / 1000) * inv.costPrice;
+    } else if (inv.unit === 'ml' || inv.unit === 'liter') {
+      cost += (qty / 1000) * inv.costPrice;
+    } else if (inv.unit === 'piece') {
+      cost += (qty / 12) * inv.costPrice;
+    }
+  }
+  return cost;
+}
+
 // @route   GET /api/admin/reports/sales
 // @desc    Get sales report for a date range
 // @access  Restaurant Admin / Super Admin
@@ -702,44 +729,210 @@ router.get('/reports/sales', async (req, res, next) => {
   }
 });
 
+// @route   GET /api/admin/reports/day
+// @desc    Full day report with cost & profit
+// @access  Restaurant Admin / Super Admin
+router.get('/reports/day', async (req, res, next) => {
+  try {
+    const restaurantId = getRestaurantIdForRequest(req);
+    const { date } = req.query;
+    const reportDate = date ? new Date(date) : new Date();
+    const startOfDay = new Date(reportDate);
+    startOfDay.setHours(0, 0, 0, 0);
+    const endOfDay = new Date(reportDate);
+    endOfDay.setHours(23, 59, 59, 999);
+
+    const [allOrders, invItems, mItems] = await Promise.all([
+      Order.find({ restaurant: restaurantId, createdAt: { $gte: startOfDay, $lte: endOfDay } }),
+      InventoryItem.find({ restaurant: restaurantId }),
+      MenuItem.find({ restaurant: restaurantId }),
+    ]);
+
+    const iMap = new Map();
+    for (const i of invItems) iMap.set(i._id.toString(), i);
+    const mcMap = new Map();
+    for (const m of mItems) mcMap.set(m._id.toString(), computeItemCost(m, iMap));
+
+    const completed = allOrders.filter(o => o.status === 'COMPLETED');
+    const cancelled = allOrders.filter(o => o.status === 'CANCELLED');
+    const grossSales = completed.reduce((s, o) => s + o.subtotal, 0);
+    const totalDisc = completed.reduce((s, o) => s + (o.discountAmount || 0), 0);
+    const totalRev = completed.reduce((s, o) => s + o.total, 0);
+
+    let budgetCost = 0;
+    for (const o of completed) {
+      for (const it of o.items) {
+        const mid = it.menuItem ? it.menuItem.toString() : null;
+        budgetCost += (mid ? (mcMap.get(mid) || 0) : 0) * it.quantity;
+      }
+    }
+
+    // Payment-wise breakdown
+    const pm = {};
+    for (const o of completed) {
+      const m = o.paymentMethod || 'CASH';
+      if (!pm[m]) pm[m] = { orders: 0, amount: 0 };
+      pm[m].orders++;
+      pm[m].amount += o.total;
+    }
+    const pmLabels = { CASH: 'Cash', CARD: 'Card', ONLINE: 'Online', OTHER: 'Foodpanda' };
+    const paymentRows = Object.entries(pm).map(([m, d]) => ({
+      method: pmLabels[m] || m,
+      orders: d.orders,
+      amount: Math.round(d.amount),
+      percent: completed.length > 0 ? ((d.orders / completed.length) * 100).toFixed(1) + '%' : '0%',
+    }));
+    paymentRows.push({ method: 'Total', orders: completed.length, amount: Math.round(totalRev), percent: '100%' });
+
+    // Order type breakdown
+    const tm = {};
+    for (const o of completed) {
+      const t = o.orderType || 'DINE_IN';
+      if (!tm[t]) tm[t] = { orders: 0, amount: 0 };
+      tm[t].orders++;
+      tm[t].amount += o.total;
+    }
+    const otLabels = { DINE_IN: 'Dine-in', TAKEAWAY: 'Takeaway', DELIVERY: 'Delivery' };
+    const orderTypeRows = Object.entries(tm).map(([t, d]) => ({
+      type: otLabels[t] || t,
+      orders: d.orders,
+      amount: Math.round(d.amount),
+      percent: completed.length > 0 ? ((d.orders / completed.length) * 100).toFixed(1) + '%' : '0%',
+    }));
+
+    res.json({
+      date: startOfDay.toISOString(),
+      salesDetails: {
+        grossSales: Math.round(grossSales),
+        netSales: Math.round(grossSales - totalDisc),
+        discounts: Math.round(totalDisc),
+        deliveryCharges: 0,
+        totalRevenue: Math.round(totalRev),
+        taxAmount: 0,
+        budgetCost: Math.round(budgetCost),
+        profit: Math.round(totalRev - budgetCost),
+      },
+      insights: {
+        totalOrders: allOrders.length,
+        completedSales: completed.length,
+        paidSales: completed.length,
+        cancelledToday: cancelled.length,
+      },
+      paymentRows,
+      orderTypeRows,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // @route   GET /api/admin/dashboard/summary
-// @desc    Dashboard widgets: today’s revenue, orders count, low-stock items
+// @desc    Dashboard: revenue, orders, charts, cost & profit
 // @access  Restaurant Admin / Super Admin
 router.get('/dashboard/summary', async (req, res, next) => {
   try {
     const restaurantId = getRestaurantIdForRequest(req);
-
     const startOfDay = new Date();
     startOfDay.setHours(0, 0, 0, 0);
     const endOfDay = new Date();
     endOfDay.setHours(23, 59, 59, 999);
 
-    const [todayOrders, inventoryItems] = await Promise.all([
-      Order.find({
-        restaurant: restaurantId,
-        status: 'COMPLETED',
-        createdAt: { $gte: startOfDay, $lte: endOfDay },
-      }),
+    const [allTodayOrders, inventoryItems, allMenuItems, categories] = await Promise.all([
+      Order.find({ restaurant: restaurantId, createdAt: { $gte: startOfDay, $lte: endOfDay } }),
       InventoryItem.find({ restaurant: restaurantId }),
+      MenuItem.find({ restaurant: restaurantId }),
+      Category.find({ restaurant: restaurantId }),
     ]);
 
-    const todaysRevenue = todayOrders.reduce((sum, o) => sum + o.total, 0);
-    const todaysOrdersCount = todayOrders.length;
+    const completedOrders = allTodayOrders.filter(o => o.status === 'COMPLETED');
+    const pendingOrders = allTodayOrders.filter(o => ['UNPROCESSED', 'PENDING', 'READY'].includes(o.status));
+    const todaysRevenue = completedOrders.reduce((s, o) => s + o.total, 0);
+    const todaysOrdersCount = completedOrders.length;
+
+    // Build inventory map for cost calculations
+    const invMap = new Map();
+    for (const inv of inventoryItems) invMap.set(inv._id.toString(), inv);
+    const miCostMap = new Map();
+    for (const mi of allMenuItems) miCostMap.set(mi._id.toString(), computeItemCost(mi, invMap));
+
+    let totalBudgetCost = 0;
+    for (const order of completedOrders) {
+      for (const item of order.items) {
+        const mid = item.menuItem ? item.menuItem.toString() : null;
+        totalBudgetCost += (mid ? (miCostMap.get(mid) || 0) : 0) * item.quantity;
+      }
+    }
 
     const lowStockItems = inventoryItems
-      .filter((i) => i.lowStockThreshold > 0 && i.currentStock <= i.lowStockThreshold)
-      .map((i) => ({
-        id: i._id.toString(),
-        name: i.name,
-        unit: i.unit,
-        currentStock: i.currentStock,
-        lowStockThreshold: i.lowStockThreshold,
-      }));
+      .filter(i => i.lowStockThreshold > 0 && i.currentStock <= i.lowStockThreshold)
+      .map(i => ({ id: i._id.toString(), name: i.name, unit: i.unit, currentStock: i.currentStock, lowStockThreshold: i.lowStockThreshold }));
+
+    // Hourly sales (0-23)
+    const hourlySales = new Array(24).fill(0);
+    for (const o of completedOrders) hourlySales[new Date(o.createdAt).getHours()] += o.total;
+
+    // Sales type distribution
+    const salesTypeDistribution = {};
+    for (const o of completedOrders) {
+      const t = o.orderType || 'DINE_IN';
+      salesTypeDistribution[t] = (salesTypeDistribution[t] || 0) + 1;
+    }
+
+    // Payment method distribution
+    const paymentDistribution = {};
+    for (const o of completedOrders) {
+      const m = o.paymentMethod || 'CASH';
+      paymentDistribution[m] = (paymentDistribution[m] || 0) + 1;
+    }
+
+    // Order source distribution
+    const sourceDistribution = {};
+    for (const o of completedOrders) {
+      const s = o.source || 'POS';
+      sourceDistribution[s] = (sourceDistribution[s] || 0) + 1;
+    }
+
+    // Top products
+    const productMap = new Map();
+    for (const o of completedOrders) {
+      for (const item of o.items) {
+        const key = item.name;
+        const ex = productMap.get(key) || { name: item.name, qty: 0, revenue: 0, menuItemId: item.menuItem ? item.menuItem.toString() : null };
+        ex.qty += item.quantity;
+        ex.revenue += item.lineTotal;
+        productMap.set(key, ex);
+      }
+    }
+    const topProducts = Array.from(productMap.values()).sort((a, b) => b.qty - a.qty).slice(0, 10);
+
+    // Category map for product performance
+    const categoryMap = new Map();
+    for (const cat of categories) categoryMap.set(cat._id.toString(), cat.name);
+    const menuItemCategoryMap = new Map();
+    for (const mi of allMenuItems) {
+      menuItemCategoryMap.set(mi._id.toString(), categoryMap.get(mi.category ? mi.category.toString() : '') || 'Uncategorized');
+    }
+
+    const productsPerformance = topProducts.map(p => ({
+      name: p.name,
+      category: p.menuItemId ? (menuItemCategoryMap.get(p.menuItemId) || 'Uncategorized') : 'Uncategorized',
+      qtySold: p.qty,
+      priceSold: Math.round(p.revenue),
+    }));
 
     res.json({
       todaysRevenue,
       todaysOrdersCount,
+      pendingOrdersCount: pendingOrders.length,
+      totalBudgetCost: Math.round(totalBudgetCost),
+      totalProfit: Math.round(todaysRevenue - totalBudgetCost),
       lowStockItems,
+      hourlySales,
+      salesTypeDistribution,
+      paymentDistribution,
+      sourceDistribution,
+      topProducts: topProducts.slice(0, 5),
+      productsPerformance,
     });
   } catch (error) {
     next(error);
@@ -871,4 +1064,3 @@ router.delete('/users/:id', async (req, res, next) => {
 });
 
 module.exports = router;
-

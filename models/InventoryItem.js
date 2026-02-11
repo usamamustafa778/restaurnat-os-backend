@@ -29,6 +29,15 @@ const inventoryItemSchema = new mongoose.Schema(
       min: 0,
       default: 0,
     },
+    // Cost price per bulk unit:
+    //   gram  -> price per 1000 grams
+    //   ml    -> price per 1000 ml
+    //   piece -> price per 12 pieces (dozen)
+    costPrice: {
+      type: Number,
+      min: 0,
+      default: 0,
+    },
   },
   {
     timestamps: true,
