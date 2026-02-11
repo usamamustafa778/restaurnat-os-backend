@@ -17,6 +17,7 @@ const posRoutes = require('./routes/posRoutes');
 const uploadRoutes = require('./routes/uploadRoutes');
 const integrationRoutes = require('./routes/integrationRoutes');
 const subscriptionRoutes = require('./routes/subscriptionRoutes');
+const profileRoutes = require('./routes/profileRoutes');
 
 const app = express();
 
@@ -35,6 +36,7 @@ app.use('/api/upload', uploadRoutes);
 app.use('/api/integrations', integrationRoutes);
 app.use('/api', integrationRoutes); // mounts /api/webhooks/foodpanda/:restaurantId
 app.use('/api/subscription', subscriptionRoutes);
+app.use('/api/profile', profileRoutes);
 
 // Health check
 app.get('/health', (req, res) => {

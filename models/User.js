@@ -34,6 +34,10 @@ const userSchema = new mongoose.Schema(
       ],
       default: 'manager',
     },
+    profileImageUrl: {
+      type: String,
+      default: null,
+    },
     restaurant: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Restaurant',

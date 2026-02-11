@@ -89,6 +89,7 @@ const mapUser = (user) => ({
   name: user.name,
   email: user.email,
   role: user.role,
+  profileImageUrl: user.profileImageUrl || null,
   createdAt: user.createdAt.toISOString(),
 });
 
@@ -765,7 +766,7 @@ router.get('/users', async (req, res, next) => {
 // @access  Restaurant Admin / Super Admin
 router.post('/users', async (req, res, next) => {
   try {
-    const { name, email, password, role } = req.body;
+    const { name, email, password, role, profileImageUrl } = req.body;
     const restaurantId = getRestaurantIdForRequest(req);
 
     if (!name || !email || !password) {
@@ -794,6 +795,7 @@ router.post('/users', async (req, res, next) => {
       email: email.toLowerCase().trim(),
       password,
       role: role || 'manager',
+      profileImageUrl: profileImageUrl || null,
       restaurant: restaurantId,
     });
 
@@ -809,7 +811,7 @@ router.post('/users', async (req, res, next) => {
 router.put('/users/:id', async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { name, email, password, role } = req.body;
+    const { name, email, password, role, profileImageUrl } = req.body;
     const restaurantId = getRestaurantIdForRequest(req);
 
     const user = await User.findOne({ _id: id, restaurant: restaurantId });
@@ -834,6 +836,9 @@ router.put('/users/:id', async (req, res, next) => {
     }
     if (password) {
       user.password = password; // will be hashed by pre-save hook
+    }
+    if (profileImageUrl !== undefined) {
+      user.profileImageUrl = profileImageUrl || null;
     }
 
     await user.save();
