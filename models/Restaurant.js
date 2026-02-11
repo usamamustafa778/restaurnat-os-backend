@@ -9,19 +9,18 @@ const subscriptionSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ['TRIAL', 'ACTIVE', 'SUSPENDED'],
+      enum: ['TRIAL', 'ACTIVE', 'SUSPENDED', 'EXPIRED'],
       default: 'TRIAL',
     },
-    // Trial window for newly created tenants
-    trialStartsAt: {
-      type: Date,
-    },
-    trialEndsAt: {
-      type: Date,
-    },
-    expiresAt: {
-      type: Date,
-    },
+    // Legacy fields (kept for backward compat)
+    trialStartsAt: { type: Date },
+    trialEndsAt: { type: Date },
+    expiresAt: { type: Date },
+    // New subscription fields
+    freeTrialStartDate: { type: Date },
+    freeTrialEndDate: { type: Date },
+    subscriptionStartDate: { type: Date },
+    subscriptionEndDate: { type: Date },
   },
   { _id: false }
 );
@@ -97,6 +96,21 @@ const websiteSettingsSchema = new mongoose.Schema(
       saturday: { type: String, default: '10:00 AM - 11:00 PM' },
       sunday: { type: String, default: '10:00 AM - 11:00 PM' },
     },
+    // Allow customers to place orders from the public website
+    allowWebsiteOrders: {
+      type: Boolean,
+      default: true,
+    },
+    // Website Sections – up to 3 customizable sections for the public website
+    websiteSections: [{
+      title: { type: String, default: '' },
+      subtitle: { type: String, default: '' },
+      isActive: { type: Boolean, default: true },
+      items: [{
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'MenuItem',
+      }],
+    }],
   },
   { _id: false }
 );
@@ -105,6 +119,7 @@ const restaurantSchema = new mongoose.Schema(
   {
     website: websiteSettingsSchema,
     subscription: subscriptionSchema,
+    readonly: { type: Boolean, default: false },
     settings: {
       // POS / inventory behaviour that may be configurable later
       allowOrderWhenOutOfStock: {

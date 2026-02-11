@@ -2,6 +2,7 @@ const express = require('express');
 const Category = require('../models/Category');
 const MenuItem = require('../models/MenuItem');
 const Restaurant = require('../models/Restaurant');
+const Order = require('../models/Order');
 
 const router = express.Router();
 
@@ -51,6 +52,33 @@ router.get('/menu', async (req, res, next) => {
       MenuItem.find({ restaurant: restaurant._id, available: true, showOnWebsite: true }).populate('category'),
     ]);
 
+    // Populate website sections with full menu item data
+    const rawSections = restaurant.website?.websiteSections || [];
+    const websiteSections = [];
+    for (const section of rawSections) {
+      if (!section.isActive) continue;
+      const sectionItemIds = (section.items || []).map((id) => id.toString());
+      const sectionItems = await MenuItem.find({
+        _id: { $in: sectionItemIds },
+        restaurant: restaurant._id,
+        available: true,
+        showOnWebsite: true,
+      }).populate('category');
+
+      websiteSections.push({
+        title: section.title || '',
+        subtitle: section.subtitle || '',
+        items: sectionItems.map((item) => ({
+          id: item._id.toString(),
+          name: item.name,
+          description: item.description || item.category?.description || '',
+          price: item.price,
+          category: item.category?.name || 'Uncategorized',
+          imageUrl: item.imageUrl,
+        })),
+      });
+    }
+
     const response = items.map((item) => ({
       id: item._id.toString(),
       name: item.name,
@@ -78,6 +106,8 @@ router.get('/menu', async (req, res, next) => {
         socialMedia: restaurant.website?.socialMedia || {},
         themeColors: restaurant.website?.themeColors || { primary: '#EF4444', secondary: '#FFA500' },
         openingHours: restaurant.website?.openingHours || {},
+        websiteSections,
+        allowWebsiteOrders: restaurant.website?.allowWebsiteOrders !== false,
       },
       menu: response,
       categories: categories.map((c) => ({
@@ -85,6 +115,101 @@ router.get('/menu', async (req, res, next) => {
         name: c.name,
         description: c.description || '',
       })),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @route   POST /api/orders/website
+// @desc    Place an order from the public website (Cash on Delivery)
+// @access  Public
+router.post('/orders/website', async (req, res, next) => {
+  try {
+    const { subdomain, customerName, customerPhone, deliveryAddress, items } = req.body;
+
+    if (!subdomain) {
+      return res.status(400).json({ message: 'Restaurant subdomain is required' });
+    }
+    if (!customerPhone || !customerPhone.trim()) {
+      return res.status(400).json({ message: 'Phone number is required' });
+    }
+    if (!items || !Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ message: 'At least one item is required' });
+    }
+
+    const restaurant = await Restaurant.findOne({ 'website.subdomain': subdomain.toLowerCase().trim() });
+    if (!restaurant) {
+      return res.status(404).json({ message: 'Restaurant not found' });
+    }
+
+    if (restaurant.subscription?.status === 'SUSPENDED') {
+      return res.status(403).json({ message: 'Subscription inactive or expired' });
+    }
+
+    if (restaurant.website?.allowWebsiteOrders === false) {
+      return res.status(403).json({ message: 'Online ordering is temporarily unavailable. Please contact the restaurant directly.' });
+    }
+
+    // Validate and build order items
+    const menuItemIds = items.map(i => i.menuItemId);
+    const menuItems = await MenuItem.find({
+      _id: { $in: menuItemIds },
+      restaurant: restaurant._id,
+      available: true,
+    });
+
+    const menuItemMap = {};
+    for (const mi of menuItems) {
+      menuItemMap[mi._id.toString()] = mi;
+    }
+
+    let subtotal = 0;
+    const orderItems = [];
+
+    for (const cartItem of items) {
+      const mi = menuItemMap[cartItem.menuItemId];
+      if (!mi) {
+        return res.status(400).json({ message: `Menu item not found or unavailable: ${cartItem.menuItemId}` });
+      }
+      const qty = Math.max(1, parseInt(cartItem.quantity) || 1);
+      const lineTotal = mi.price * qty;
+      subtotal += lineTotal;
+      orderItems.push({
+        menuItem: mi._id,
+        name: mi.name,
+        quantity: qty,
+        unitPrice: mi.price,
+        lineTotal,
+      });
+    }
+
+    // Generate order number using local date
+    const now = new Date();
+    const todayStr = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}`;
+    const count = await Order.countDocuments({ restaurant: restaurant._id });
+    const orderNumber = `WEB-${todayStr}-${String(count + 1).padStart(4, '0')}`;
+
+    const order = await Order.create({
+      restaurant: restaurant._id,
+      orderType: 'DELIVERY',
+      paymentMethod: 'CASH',
+      source: 'WEBSITE',
+      status: 'UNPROCESSED',
+      customerName: (customerName || '').trim() || 'Website Customer',
+      customerPhone: customerPhone.trim(),
+      deliveryAddress: (deliveryAddress || '').trim(),
+      items: orderItems,
+      subtotal,
+      discountAmount: 0,
+      total: subtotal,
+      orderNumber,
+    });
+
+    res.status(201).json({
+      message: 'Order placed successfully!',
+      orderNumber: order.orderNumber,
+      total: order.total,
     });
   } catch (error) {
     next(error);

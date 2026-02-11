@@ -44,6 +44,11 @@ router.post('/restaurants', async (req, res, next) => {
       return res.status(400).json({ message: 'Admin email already in use' });
     }
 
+    // Default 15-day free trial for new restaurants
+    const now = new Date();
+    const defaultTrialEnd = new Date(now);
+    defaultTrialEnd.setDate(defaultTrialEnd.getDate() + 15);
+
     const restaurant = await Restaurant.create({
       website: {
         subdomain: subdomain.toLowerCase().trim(),
@@ -58,9 +63,14 @@ router.post('/restaurants', async (req, res, next) => {
       subscription: {
         plan: subscriptionPlan || 'ESSENTIAL',
         status: subscriptionStatus || 'TRIAL',
-        trialEndsAt: trialEndsAt ? new Date(trialEndsAt) : undefined,
-        expiresAt: expiresAt ? new Date(expiresAt) : undefined,
+        trialStartsAt: now,
+        trialEndsAt: trialEndsAt ? new Date(trialEndsAt) : defaultTrialEnd,
+        freeTrialStartDate: now,
+        freeTrialEndDate: trialEndsAt ? new Date(trialEndsAt) : defaultTrialEnd,
+        subscriptionStartDate: expiresAt ? now : undefined,
+        subscriptionEndDate: expiresAt ? new Date(expiresAt) : undefined,
       },
+      readonly: false,
     });
 
     const adminUser = await User.create({

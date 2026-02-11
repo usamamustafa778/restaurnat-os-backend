@@ -2,11 +2,11 @@ const express = require('express');
 const MenuItem = require('../models/MenuItem');
 const InventoryItem = require('../models/InventoryItem');
 const Order = require('../models/Order');
-const { protect, requireRole, requireRestaurant, requireActiveSubscription } = require('../middleware/authMiddleware');
+const { protect, requireRole, requireRestaurant, checkSubscriptionStatus } = require('../middleware/authMiddleware');
 
 const router = express.Router();
 
-router.use(protect, requireRole('staff', 'restaurant_admin', 'admin', 'cashier', 'manager', 'product_manager', 'kitchen_staff'), requireRestaurant, requireActiveSubscription);
+router.use(protect, requireRole('staff', 'restaurant_admin', 'admin', 'cashier', 'manager', 'product_manager', 'kitchen_staff'), requireRestaurant, checkSubscriptionStatus);
 
 /**
  * Generate a sequential order number: ORD-YYYYMMDD-0001, 0002, etc.
@@ -44,7 +44,7 @@ const generateOrderNumber = async (restaurantId) => {
 // @access  Staff / Restaurant Admin
 router.post('/orders', async (req, res, next) => {
   try {
-    const { items, orderType, paymentMethod, discountAmount = 0 } = req.body;
+    const { items, orderType, paymentMethod, discountAmount = 0, customerName = '', customerPhone = '', deliveryAddress = '' } = req.body;
 
     if (!Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ message: 'Order items are required' });
@@ -153,6 +153,9 @@ router.post('/orders', async (req, res, next) => {
       subtotal,
       discountAmount: discount,
       total,
+      customerName: customerName || '',
+      customerPhone: customerPhone || '',
+      deliveryAddress: deliveryAddress || '',
       orderNumber: await generateOrderNumber(req.restaurant._id),
     });
 

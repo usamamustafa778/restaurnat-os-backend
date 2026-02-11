@@ -39,7 +39,7 @@ router.post('/register', async (req, res, next) => {
       restaurant: restaurant ? restaurant._id : undefined,
     });
 
-    const token = generateToken(user);
+    const token = generateToken(user, restaurant?.website?.subdomain || null);
     const refreshToken = generateRefreshToken(user);
 
     res.status(201).json({
@@ -88,7 +88,7 @@ router.post('/login', async (req, res, next) => {
       }
     }
 
-    const token = generateToken(user);
+    const token = generateToken(user, restaurantSlug);
 
     const refreshToken = generateRefreshToken(user);
 
@@ -144,11 +144,11 @@ router.post('/register-restaurant', async (req, res, next) => {
       return res.status(400).json({ message: 'Email already registered' });
     }
 
-    // Create the restaurant with trial subscription
-    const trialDays = 14;
-    const trialStartsAt = new Date();
-    const trialEndsAt = new Date(trialStartsAt);
-    trialEndsAt.setDate(trialEndsAt.getDate() + trialDays);
+    // Create the restaurant with 15-day free trial
+    const trialDays = 15;
+    const freeTrialStartDate = new Date();
+    const freeTrialEndDate = new Date(freeTrialStartDate);
+    freeTrialEndDate.setDate(freeTrialEndDate.getDate() + trialDays);
 
     const restaurant = await Restaurant.create({
       website: {
@@ -161,9 +161,12 @@ router.post('/register-restaurant', async (req, res, next) => {
       subscription: {
         plan: 'ESSENTIAL',
         status: 'TRIAL',
-        trialStartsAt,
-        trialEndsAt,
+        trialStartsAt: freeTrialStartDate,
+        trialEndsAt: freeTrialEndDate,
+        freeTrialStartDate,
+        freeTrialEndDate,
       },
+      readonly: false,
     });
 
     // Create the restaurant owner user (maps to restaurant_admin role in current RBAC)
@@ -176,7 +179,7 @@ router.post('/register-restaurant', async (req, res, next) => {
     });
 
     // Generate token for immediate login
-    const token = generateToken(adminUser);
+    const token = generateToken(adminUser, restaurant.website.subdomain);
     const refreshToken = generateRefreshToken(adminUser);
 
     res.status(201).json({
@@ -233,7 +236,13 @@ router.post('/refresh', async (req, res, next) => {
       return res.status(401).json({ message: 'User not found for refresh token' });
     }
 
-    const newAccessToken = generateToken(user);
+    let tenantSlug = null;
+    if (user.restaurant) {
+      const rest = await Restaurant.findById(user.restaurant);
+      if (rest?.website?.subdomain) tenantSlug = rest.website.subdomain;
+    }
+
+    const newAccessToken = generateToken(user, tenantSlug);
     const newRefreshToken = generateRefreshToken(user);
 
     res.json({

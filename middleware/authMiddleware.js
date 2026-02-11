@@ -48,6 +48,12 @@ const requireRestaurant = async (req, res, next) => {
       return res.status(404).json({ message: 'Restaurant not found' });
     }
 
+    // Prevent cross-tenant access: verify x-tenant-slug matches the user's restaurant
+    const tenantSlug = req.headers['x-tenant-slug'];
+    if (tenantSlug && restaurant.website?.subdomain && tenantSlug !== restaurant.website.subdomain) {
+      return res.status(403).json({ message: 'Access denied: you do not have permission to access this restaurant' });
+    }
+
     req.restaurant = restaurant;
     next();
   } catch (error) {
@@ -57,21 +63,19 @@ const requireRestaurant = async (req, res, next) => {
 
 const isSubscriptionActive = (restaurant) => {
   if (!restaurant.subscription) return false;
-  const { status, trialEndsAt, expiresAt } = restaurant.subscription;
-
-  if (status === 'SUSPENDED') return false;
-
+  const sub = restaurant.subscription;
   const now = new Date();
 
-  if (status === 'TRIAL') {
-    if (!trialEndsAt) return true;
-    return trialEndsAt >= now;
-  }
+  // Explicitly suspended → always inactive
+  if (sub.status === 'SUSPENDED') return false;
 
-  if (status === 'ACTIVE') {
-    if (!expiresAt) return true;
-    return expiresAt >= now;
-  }
+  // Check trial dates (new field + legacy field)
+  const trialEnd = sub.freeTrialEndDate || sub.trialEndsAt;
+  if (trialEnd && now <= new Date(trialEnd)) return true;
+
+  // Check subscription dates (new field + legacy field)
+  const subEnd = sub.subscriptionEndDate || sub.expiresAt;
+  if (subEnd && now <= new Date(subEnd)) return true;
 
   return false;
 };
@@ -93,10 +97,64 @@ const requireActiveSubscription = (req, res, next) => {
   next();
 };
 
+/**
+ * checkSubscriptionStatus – replaces hard-block with read-only mode.
+ *
+ * Logic:
+ *  - super_admin → always pass
+ *  - Free trial active OR subscription active → full access
+ *  - Otherwise → set restaurant.readonly = true in DB,
+ *    allow GET (read), block POST/PUT/DELETE (write) with 402
+ */
+const checkSubscriptionStatus = async (req, res, next) => {
+  // Super admin bypasses everything
+  if (req.user?.role === 'super_admin') {
+    return next();
+  }
+
+  if (!req.restaurant) {
+    return res.status(500).json({ message: 'Restaurant context missing for subscription check' });
+  }
+
+  const active = isSubscriptionActive(req.restaurant);
+
+  if (active) {
+    // If restaurant was previously set to readonly, clear it
+    if (req.restaurant.readonly) {
+      req.restaurant.readonly = false;
+      await req.restaurant.save();
+    }
+    return next();
+  }
+
+  // Subscription/trial expired → enforce read-only
+  if (!req.restaurant.readonly) {
+    req.restaurant.readonly = true;
+    if (req.restaurant.subscription) {
+      req.restaurant.subscription.status = 'EXPIRED';
+    }
+    await req.restaurant.save();
+  }
+
+  // Allow read operations (GET, HEAD, OPTIONS)
+  const readMethods = ['GET', 'HEAD', 'OPTIONS'];
+  if (readMethods.includes(req.method.toUpperCase())) {
+    return next();
+  }
+
+  // Block write operations
+  return res.status(402).json({
+    message: 'Subscription expired. Your account is in read-only mode.',
+    readonly: true,
+  });
+};
+
 module.exports = {
   protect,
   requireRole,
   requireRestaurant,
   requireActiveSubscription,
+  checkSubscriptionStatus,
+  isSubscriptionActive,
 };
 

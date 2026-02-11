@@ -15,7 +15,7 @@ const inventoryItemSchema = new mongoose.Schema(
     },
     unit: {
       type: String,
-      enum: ['kg', 'liter', 'piece'],
+      enum: ['kg', 'liter', 'gram', 'ml', 'piece'],
       required: true,
     },
     currentStock: {

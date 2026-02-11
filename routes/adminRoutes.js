@@ -5,7 +5,7 @@ const InventoryItem = require('../models/InventoryItem');
 const Order = require('../models/Order');
 const User = require('../models/User');
 const Restaurant = require('../models/Restaurant');
-const { protect, requireRole, requireRestaurant, requireActiveSubscription } = require('../middleware/authMiddleware');
+const { protect, requireRole, requireRestaurant, checkSubscriptionStatus } = require('../middleware/authMiddleware');
 
 const router = express.Router();
 
@@ -39,8 +39,14 @@ router.use(async (req, res, next) => {
       return res.status(404).json({ message: 'Restaurant not found' });
     }
 
+    // Prevent cross-tenant access: verify the x-tenant-slug header matches the user's restaurant
+    const tenantSlug = req.headers['x-tenant-slug'];
+    if (tenantSlug && restaurant.website?.subdomain && tenantSlug !== restaurant.website.subdomain) {
+      return res.status(403).json({ message: 'Access denied: you do not have permission to access this restaurant' });
+    }
+
     req.restaurant = restaurant;
-    return requireActiveSubscription(req, res, next);
+    return checkSubscriptionStatus(req, res, next);
   } catch (error) {
     return next(error);
   }
@@ -86,34 +92,49 @@ const mapUser = (user) => ({
   createdAt: user.createdAt.toISOString(),
 });
 
-const mapOrder = (order) => ({
-  id: order.orderNumber || order._id.toString(),
-  _id: order._id.toString(),
-  customerName:
-    order.createdBy && typeof order.createdBy === 'object' && order.createdBy.name
-      ? order.createdBy.name
-      : 'Walk‑in Customer',
-  total: order.total,
-  subtotal: order.subtotal,
-  discountAmount: order.discountAmount || 0,
-  status: order.status,
-  createdAt: order.createdAt,
-  items: (order.items || []).map((i) => ({
-    name: i.name,
-    qty: i.quantity,
-    unitPrice: i.unitPrice,
-    lineTotal: i.lineTotal,
-  })),
-  type:
-    order.orderType === 'DINE_IN'
-      ? 'dine-in'
-      : order.orderType === 'TAKEAWAY'
-      ? 'takeaway'
-      : 'dine-in',
-  source: 'POS',
-  paymentMethod: order.paymentMethod === 'CARD' ? 'Card' : 'Cash',
-  paymentStatus: order.status === 'COMPLETED' ? 'PAID' : 'UNPAID',
-});
+const mapOrder = (order) => {
+  // Derive customer name from different sources
+  let customerName = order.customerName || '';
+  if (!customerName && order.createdBy && typeof order.createdBy === 'object' && order.createdBy.name) {
+    customerName = order.createdBy.name;
+  }
+  if (!customerName) {
+    customerName = order.source === 'FOODPANDA' ? 'Foodpanda Customer' : 'Walk‑in Customer';
+  }
+
+  const paymentLabels = { CASH: 'Cash', CARD: 'Card', ONLINE: 'Online', OTHER: 'Other' };
+
+  return {
+    id: order.orderNumber || order._id.toString(),
+    _id: order._id.toString(),
+    customerName,
+    customerPhone: order.customerPhone || '',
+    deliveryAddress: order.deliveryAddress || '',
+    total: order.total,
+    subtotal: order.subtotal,
+    discountAmount: order.discountAmount || 0,
+    status: order.status,
+    createdAt: order.createdAt,
+    items: (order.items || []).map((i) => ({
+      name: i.name,
+      qty: i.quantity,
+      unitPrice: i.unitPrice,
+      lineTotal: i.lineTotal,
+    })),
+    type:
+      order.orderType === 'DINE_IN'
+        ? 'dine-in'
+        : order.orderType === 'TAKEAWAY'
+        ? 'takeaway'
+        : order.orderType === 'DELIVERY'
+        ? 'delivery'
+        : 'dine-in',
+    source: order.source || 'POS',
+    externalOrderId: order.externalOrderId || '',
+    paymentMethod: paymentLabels[order.paymentMethod] || order.paymentMethod || 'Cash',
+    paymentStatus: order.status === 'COMPLETED' ? 'PAID' : 'UNPAID',
+  };
+};
 
 // @route   GET /api/admin/menu
 // @desc    Get all categories and menu items for a restaurant
@@ -146,6 +167,9 @@ router.get('/orders', async (req, res, next) => {
     const query = { restaurant: restaurantId };
     if (req.query.status) {
       query.status = req.query.status;
+    }
+    if (req.query.source) {
+      query.source = req.query.source;
     }
 
     const orders = await Order.find(query)
@@ -452,6 +476,15 @@ router.post('/inventory', async (req, res, next) => {
       return res.status(400).json({ message: 'Name and unit are required' });
     }
 
+    // Prevent duplicate inventory item names within the same restaurant
+    const existing = await InventoryItem.findOne({
+      restaurant: restaurantId,
+      name: { $regex: new RegExp(`^${name.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') },
+    });
+    if (existing) {
+      return res.status(400).json({ message: `An inventory item named "${name.trim()}" already exists` });
+    }
+
     const item = await InventoryItem.create({
       restaurant: restaurantId,
       name: name.trim(),
@@ -486,7 +519,18 @@ router.put('/inventory/:id', async (req, res, next) => {
       return res.status(404).json({ message: 'Inventory item not found' });
     }
 
-    if (name !== undefined) item.name = name.trim();
+    if (name !== undefined && name.trim() !== item.name) {
+      // Prevent duplicate inventory item names within the same restaurant
+      const duplicate = await InventoryItem.findOne({
+        restaurant: restaurantId,
+        _id: { $ne: item._id },
+        name: { $regex: new RegExp(`^${name.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') },
+      });
+      if (duplicate) {
+        return res.status(400).json({ message: `An inventory item named "${name.trim()}" already exists` });
+      }
+      item.name = name.trim();
+    }
     if (unit !== undefined) item.unit = unit;
     if (lowStockThreshold !== undefined) item.lowStockThreshold = lowStockThreshold;
     if (stockAdjustment !== undefined) {
@@ -503,6 +547,25 @@ router.put('/inventory/:id', async (req, res, next) => {
       currentStock: item.currentStock,
       lowStockThreshold: item.lowStockThreshold,
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @route   DELETE /api/admin/inventory/:id
+// @desc    Delete an inventory item
+// @access  Restaurant Admin / Super Admin
+router.delete('/inventory/:id', async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const restaurantId = getRestaurantIdForRequest(req);
+
+    const item = await InventoryItem.findOneAndDelete({ _id: id, restaurant: restaurantId });
+    if (!item) {
+      return res.status(404).json({ message: 'Inventory item not found' });
+    }
+
+    res.status(204).end();
   } catch (error) {
     next(error);
   }
@@ -546,6 +609,8 @@ router.put('/website', async (req, res, next) => {
       socialMedia,
       themeColors,
       openingHours,
+      websiteSections,
+      allowWebsiteOrders,
     } = req.body;
     const restaurantId = getRestaurantIdForRequest(req);
 
@@ -574,6 +639,8 @@ router.put('/website', async (req, res, next) => {
     if (socialMedia !== undefined) restaurant.website.socialMedia = socialMedia;
     if (themeColors !== undefined) restaurant.website.themeColors = themeColors;
     if (openingHours !== undefined) restaurant.website.openingHours = openingHours;
+    if (websiteSections !== undefined) restaurant.website.websiteSections = websiteSections;
+    if (typeof allowWebsiteOrders === 'boolean') restaurant.website.allowWebsiteOrders = allowWebsiteOrders;
 
     await restaurant.save();
 

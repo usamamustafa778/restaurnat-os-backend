@@ -15,6 +15,8 @@ const adminRoutes = require('./routes/adminRoutes');
 const superAdminRoutes = require('./routes/superAdminRoutes');
 const posRoutes = require('./routes/posRoutes');
 const uploadRoutes = require('./routes/uploadRoutes');
+const integrationRoutes = require('./routes/integrationRoutes');
+const subscriptionRoutes = require('./routes/subscriptionRoutes');
 
 const app = express();
 
@@ -30,6 +32,9 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/super', superAdminRoutes);
 app.use('/api/pos', posRoutes);
 app.use('/api/upload', uploadRoutes);
+app.use('/api/integrations', integrationRoutes);
+app.use('/api', integrationRoutes); // mounts /api/webhooks/foodpanda/:restaurantId
+app.use('/api/subscription', subscriptionRoutes);
 
 // Health check
 app.get('/health', (req, res) => {

@@ -5,7 +5,7 @@ const orderItemSchema = new mongoose.Schema(
     menuItem: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'MenuItem',
-      required: true,
+      default: null,
     },
     name: {
       // name snapshot for historical reporting even if menu item changes
@@ -42,22 +42,43 @@ const orderSchema = new mongoose.Schema(
     createdBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
-      required: true,
+      default: null,
     },
     orderType: {
       type: String,
-      enum: ['DINE_IN', 'TAKEAWAY'],
+      enum: ['DINE_IN', 'TAKEAWAY', 'DELIVERY'],
       required: true,
     },
     paymentMethod: {
       type: String,
-      enum: ['CASH', 'CARD'],
+      enum: ['CASH', 'CARD', 'ONLINE', 'OTHER'],
       required: true,
     },
     status: {
       type: String,
       enum: ['UNPROCESSED', 'PENDING', 'READY', 'COMPLETED', 'CANCELLED'],
       default: 'UNPROCESSED',
+    },
+    source: {
+      type: String,
+      enum: ['POS', 'FOODPANDA', 'WEBSITE'],
+      default: 'POS',
+    },
+    externalOrderId: {
+      type: String,
+      default: '',
+    },
+    customerName: {
+      type: String,
+      default: '',
+    },
+    customerPhone: {
+      type: String,
+      default: '',
+    },
+    deliveryAddress: {
+      type: String,
+      default: '',
     },
     items: [orderItemSchema],
     subtotal: {
