@@ -1,6 +1,8 @@
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const Restaurant = require('../models/Restaurant');
+const Branch = require('../models/Branch');
+const UserBranch = require('../models/UserBranch');
 
 const protect = async (req, res, next) => {
   try {
@@ -149,6 +151,94 @@ const checkSubscriptionStatus = async (req, res, next) => {
   });
 };
 
+/**
+ * Get allowed branch IDs and default branch for a user in a restaurant.
+ * - super_admin: not used in tenant context (no restaurant).
+ * - restaurant_admin: all branches of the tenant; defaultBranchId = first branch or null.
+ * - Others: branches from UserBranch; defaultBranchId = first assigned branch or null.
+ */
+const getBranchContext = async (user, restaurantId) => {
+  if (!restaurantId) return { allowedBranchIds: [], defaultBranchId: null };
+  const isOwner = user.role === 'restaurant_admin' || user.role === 'super_admin';
+  if (isOwner) {
+    const branches = await Branch.find({ restaurant: restaurantId }).sort({ sortOrder: 1, createdAt: 1 }).select('_id').lean();
+    const allowedBranchIds = branches.map((b) => b._id.toString());
+    const defaultBranchId = allowedBranchIds[0] || null;
+    return { allowedBranchIds, defaultBranchId };
+  }
+  const assignments = await UserBranch.find({ user: user.id })
+    .populate({ path: 'branch', match: { restaurant: restaurantId } })
+    .lean();
+  const allowedBranchIds = assignments
+    .filter((a) => a.branch)
+    .map((a) => a.branch._id.toString());
+  const defaultBranchId = allowedBranchIds[0] || null;
+  return { allowedBranchIds, defaultBranchId };
+};
+
+/**
+ * Resolve req.branch from x-branch-id header (after req.restaurant is set).
+ * Sets req.user.allowedBranchIds and req.user.defaultBranchId if not already set.
+ * If x-branch-id is sent, validates branch belongs to tenant and user is allowed; sets req.branch.
+ * If user has single branch, req.branch is set to that branch regardless of header.
+ */
+const resolveBranch = async (req, res, next) => {
+  try {
+    if (!req.restaurant) {
+      return next();
+    }
+    if (req.user.role === 'super_admin') {
+      const branchId = req.headers['x-branch-id'];
+      if (branchId) {
+        const branch = await Branch.findOne({ _id: branchId, restaurant: req.restaurant._id });
+        if (branch) req.branch = branch;
+      }
+      return next();
+    }
+    if (!req.user.allowedBranchIds) {
+      const ctx = await getBranchContext(req.user, req.restaurant._id);
+      req.user.allowedBranchIds = ctx.allowedBranchIds;
+      req.user.defaultBranchId = ctx.defaultBranchId;
+    }
+    const headerBranchId = req.headers['x-branch-id'];
+    if (headerBranchId) {
+      if (!req.user.allowedBranchIds.includes(headerBranchId)) {
+        // Invalid branch for this user – ignore for GET, block for write ops
+        if (['GET', 'HEAD', 'OPTIONS'].includes(req.method.toUpperCase())) {
+          // Just skip setting req.branch; let the route see all branches
+          return next();
+        }
+        return res.status(403).json({ message: 'Access denied: you do not have access to this branch' });
+      }
+      const branch = await Branch.findOne({ _id: headerBranchId, restaurant: req.restaurant._id });
+      if (!branch) {
+        // Branch not found – ignore for GET, block for write ops
+        if (['GET', 'HEAD', 'OPTIONS'].includes(req.method.toUpperCase())) {
+          return next();
+        }
+        return res.status(404).json({ message: 'Branch not found' });
+      }
+      req.branch = branch;
+      return next();
+    }
+    if (req.user.allowedBranchIds.length === 1) {
+      const branch = await Branch.findOne({ _id: req.user.allowedBranchIds[0], restaurant: req.restaurant._id });
+      if (branch) req.branch = branch;
+    }
+    next();
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Require that req.branch is set (for branch-scoped APIs when restaurant has branches).
+ * Call after resolveBranch. If restaurant has no branches, continues without req.branch.
+ */
+const requireBranchOptional = (req, res, next) => {
+  next();
+};
+
 module.exports = {
   protect,
   requireRole,
@@ -156,5 +246,8 @@ module.exports = {
   requireActiveSubscription,
   checkSubscriptionStatus,
   isSubscriptionActive,
+  getBranchContext,
+  resolveBranch,
+  requireBranchOptional,
 };
 

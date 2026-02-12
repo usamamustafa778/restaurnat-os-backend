@@ -2,8 +2,11 @@ const express = require('express');
 const Category = require('../models/Category');
 const MenuItem = require('../models/MenuItem');
 const InventoryItem = require('../models/InventoryItem');
+const BranchMenuItem = require('../models/BranchMenuItem');
+const Customer = require('../models/Customer');
 const Restaurant = require('../models/Restaurant');
 const Order = require('../models/Order');
+const Branch = require('../models/Branch');
 
 const router = express.Router();
 
@@ -106,16 +109,51 @@ router.get('/menu', async (req, res, next) => {
       });
     }
 
-    const response = items.map((item) => ({
-      id: item._id.toString(),
-      name: item.name,
-      description: item.description || item.category?.description || '',
-      price: item.price,
-      category: item.category?.name || 'Uncategorized',
-      imageUrl: item.imageUrl,
-      isFeatured: item.isFeatured || false,
-      isBestSeller: item.isBestSeller || false,
-      tags: [],
+    // Apply branch overrides if branchId query param is present
+    const requestedBranchId = req.query.branchId;
+    let overrideMap = new Map();
+    if (requestedBranchId) {
+      const overrides = await BranchMenuItem.find({ branch: requestedBranchId }).lean();
+      for (const o of overrides) {
+        overrideMap.set(o.menuItem.toString(), o);
+      }
+    }
+
+    // Filter items by branch availability if a branch is selected
+    const branchFilteredItems = requestedBranchId
+      ? items.filter((item) => {
+          const override = overrideMap.get(item._id.toString());
+          return override ? override.available !== false : true;
+        })
+      : items;
+
+    const response = branchFilteredItems.map((item) => {
+      const override = overrideMap.get(item._id.toString());
+      return {
+        id: item._id.toString(),
+        name: item.name,
+        description: item.description || item.category?.description || '',
+        price: override?.priceOverride != null ? override.priceOverride : item.price,
+        category: item.category?.name || 'Uncategorized',
+        imageUrl: item.imageUrl,
+        isFeatured: item.isFeatured || false,
+        isBestSeller: item.isBestSeller || false,
+        tags: [],
+      };
+    });
+
+    const branches = await Branch.find({ restaurant: restaurant._id, status: 'active' })
+      .sort({ sortOrder: 1, createdAt: 1 })
+      .select('name code address contactPhone contactEmail openingHours')
+      .lean();
+    const branchesPayload = branches.map((b) => ({
+      id: b._id.toString(),
+      name: b.name,
+      code: b.code || '',
+      address: b.address || '',
+      contactPhone: b.contactPhone || '',
+      contactEmail: b.contactEmail || '',
+      openingHours: b.openingHours || {},
     }));
 
     res.json({
@@ -142,6 +180,7 @@ router.get('/menu', async (req, res, next) => {
         name: c.name,
         description: c.description || '',
       })),
+      branches: branchesPayload,
     });
   } catch (error) {
     next(error);
@@ -149,11 +188,11 @@ router.get('/menu', async (req, res, next) => {
 });
 
 // @route   POST /api/orders/website
-// @desc    Place an order from the public website (Cash on Delivery)
+// @desc    Place an order from the public website (Cash on Delivery); branchId required when restaurant has branches
 // @access  Public
 router.post('/orders/website', async (req, res, next) => {
   try {
-    const { subdomain, customerName, customerPhone, deliveryAddress, items } = req.body;
+    const { subdomain, customerName, customerPhone, deliveryAddress, items, branchId } = req.body;
 
     if (!subdomain) {
       return res.status(400).json({ message: 'Restaurant subdomain is required' });
@@ -168,6 +207,20 @@ router.post('/orders/website', async (req, res, next) => {
     const restaurant = await Restaurant.findOne({ 'website.subdomain': subdomain.toLowerCase().trim() });
     if (!restaurant) {
       return res.status(404).json({ message: 'Restaurant not found' });
+    }
+
+    let branch = null;
+    const branchCount = await Branch.countDocuments({ restaurant: restaurant._id });
+    if (branchCount > 0) {
+      if (!branchId) {
+        return res.status(400).json({ message: 'branchId is required when restaurant has branches' });
+      }
+      branch = await Branch.findOne({ _id: branchId, restaurant: restaurant._id });
+      if (!branch) {
+        return res.status(400).json({ message: 'Invalid branchId for this restaurant' });
+      }
+    } else if (branchId) {
+      branch = await Branch.findOne({ _id: branchId, restaurant: restaurant._id });
     }
 
     if (restaurant.subscription?.status === 'SUSPENDED') {
@@ -217,8 +270,30 @@ router.post('/orders/website', async (req, res, next) => {
     const count = await Order.countDocuments({ restaurant: restaurant._id });
     const orderNumber = `WEB-${todayStr}-${String(count + 1).padStart(4, '0')}`;
 
+    // Upsert customer record
+    try {
+      await Customer.findOneAndUpdate(
+        { restaurant: restaurant._id, branch: branch ? branch._id : null, phone: customerPhone.trim() },
+        {
+          $set: {
+            name: (customerName || '').trim() || 'Website Customer',
+            address: (deliveryAddress || '').trim(),
+            lastOrderAt: new Date(),
+          },
+          $inc: { totalOrders: 1, totalSpent: subtotal },
+          $setOnInsert: {
+            restaurant: restaurant._id,
+            branch: branch ? branch._id : null,
+            phone: customerPhone.trim(),
+          },
+        },
+        { upsert: true }
+      );
+    } catch (_) { /* non-critical */ }
+
     const order = await Order.create({
       restaurant: restaurant._id,
+      branch: branch ? branch._id : undefined,
       orderType: 'DELIVERY',
       paymentMethod: 'CASH',
       source: 'WEBSITE',

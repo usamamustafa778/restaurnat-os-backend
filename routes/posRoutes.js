@@ -1,7 +1,10 @@
 const express = require('express');
 const MenuItem = require('../models/MenuItem');
 const InventoryItem = require('../models/InventoryItem');
+const BranchInventory = require('../models/BranchInventory');
+const Customer = require('../models/Customer');
 const Order = require('../models/Order');
+const Branch = require('../models/Branch');
 const { protect, requireRole, requireRestaurant, checkSubscriptionStatus } = require('../middleware/authMiddleware');
 
 const router = express.Router();
@@ -40,14 +43,29 @@ const generateOrderNumber = async (restaurantId) => {
 };
 
 // @route   POST /api/pos/orders
-// @desc    Create and complete a new POS order
+// @desc    Create and complete a new POS order (branchId required when restaurant has branches)
 // @access  Staff / Restaurant Admin
 router.post('/orders', async (req, res, next) => {
   try {
-    const { items, orderType, paymentMethod, discountAmount = 0, customerName = '', customerPhone = '', deliveryAddress = '' } = req.body;
+    const { items, orderType, paymentMethod, discountAmount = 0, customerName = '', customerPhone = '', deliveryAddress = '', branchId, tableNumber, tableId } = req.body;
 
     if (!Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ message: 'Order items are required' });
+    }
+
+    const restaurantId = req.restaurant._id;
+    const branchCount = await Branch.countDocuments({ restaurant: restaurantId });
+    let branch = null;
+    if (branchCount > 0) {
+      if (!branchId) {
+        return res.status(400).json({ message: 'branchId is required when restaurant has branches' });
+      }
+      branch = await Branch.findOne({ _id: branchId, restaurant: restaurantId });
+      if (!branch) {
+        return res.status(400).json({ message: 'Invalid branchId for this restaurant' });
+      }
+    } else if (branchId) {
+      branch = await Branch.findOne({ _id: branchId, restaurant: restaurantId });
     }
 
     if (!['DINE_IN', 'TAKEAWAY'].includes(orderType)) {
@@ -94,7 +112,7 @@ router.post('/orders', async (req, res, next) => {
     const discount = Math.max(0, Number(discountAmount) || 0);
     const total = Math.max(0, subtotal - discount);
 
-    // Inventory deduction
+    // Inventory deduction (branch-aware)
     const consumptionByInventoryId = new Map();
     for (const orderItem of orderItems) {
       const menu = menuMap.get(orderItem.menuItem.toString());
@@ -109,42 +127,88 @@ router.post('/orders', async (req, res, next) => {
 
     if (consumptionByInventoryId.size > 0) {
       const inventoryIds = Array.from(consumptionByInventoryId.keys());
-      const inventoryItems = await InventoryItem.find({
-        _id: { $in: inventoryIds },
-        restaurant: req.restaurant._id,
-      });
 
-      if (inventoryItems.length !== inventoryIds.length) {
-        return res.status(400).json({ message: 'Inventory configuration invalid for one or more items' });
-      }
+      if (branch) {
+        // Branch-level stock deduction
+        const branchInvRows = await BranchInventory.find({ branch: branch._id, inventoryItem: { $in: inventoryIds } });
+        const branchInvMap = new Map(branchInvRows.map((r) => [r.inventoryItem.toString(), r]));
+        // Also load item names for error messages
+        const itemDefs = await InventoryItem.find({ _id: { $in: inventoryIds }, restaurant: req.restaurant._id });
+        const itemNameMap = new Map(itemDefs.map((d) => [d._id.toString(), d.name]));
 
-      const insufficient = [];
-      for (const inv of inventoryItems) {
-        const required = consumptionByInventoryId.get(inv._id.toString());
-        if (inv.currentStock < required && !req.restaurant.settings.allowOrderWhenOutOfStock) {
-          insufficient.push({ itemId: inv._id, name: inv.name, required, available: inv.currentStock });
+        const insufficient = [];
+        for (const [invId, required] of consumptionByInventoryId.entries()) {
+          const brRow = branchInvMap.get(invId);
+          const available = brRow ? brRow.currentStock : 0;
+          if (available < required && !req.restaurant.settings.allowOrderWhenOutOfStock) {
+            insufficient.push({ itemId: invId, name: itemNameMap.get(invId) || 'Unknown', required, available });
+          }
         }
-      }
-
-      if (insufficient.length > 0) {
-        return res.status(400).json({
-          message: 'Insufficient stock for one or more items',
-          details: insufficient,
+        if (insufficient.length > 0) {
+          return res.status(400).json({ message: 'Insufficient stock for one or more items', details: insufficient });
+        }
+        // Deduct from BranchInventory
+        await Promise.all(
+          Array.from(consumptionByInventoryId.entries()).map(async ([invId, required]) => {
+            await BranchInventory.findOneAndUpdate(
+              { branch: branch._id, inventoryItem: invId },
+              { $inc: { currentStock: -required } },
+              { upsert: false }
+            );
+          })
+        );
+      } else {
+        // Restaurant-level stock deduction (legacy/no branches)
+        const inventoryItems = await InventoryItem.find({
+          _id: { $in: inventoryIds },
+          restaurant: req.restaurant._id,
         });
-      }
 
-      // Deduct stock
-      await Promise.all(
-        inventoryItems.map((inv) => {
+        if (inventoryItems.length !== inventoryIds.length) {
+          return res.status(400).json({ message: 'Inventory configuration invalid for one or more items' });
+        }
+
+        const insufficient = [];
+        for (const inv of inventoryItems) {
           const required = consumptionByInventoryId.get(inv._id.toString());
-          inv.currentStock = Math.max(0, inv.currentStock - required);
-          return inv.save();
-        })
-      );
+          if (inv.currentStock < required && !req.restaurant.settings.allowOrderWhenOutOfStock) {
+            insufficient.push({ itemId: inv._id, name: inv.name, required, available: inv.currentStock });
+          }
+        }
+        if (insufficient.length > 0) {
+          return res.status(400).json({ message: 'Insufficient stock for one or more items', details: insufficient });
+        }
+        // Deduct stock from InventoryItem
+        await Promise.all(
+          inventoryItems.map((inv) => {
+            const required = consumptionByInventoryId.get(inv._id.toString());
+            inv.currentStock = Math.max(0, inv.currentStock - required);
+            return inv.save();
+          })
+        );
+      }
+    }
+
+    // Upsert customer record for this order
+    if (customerPhone && customerPhone.trim()) {
+      try {
+        await Customer.findOneAndUpdate(
+          { restaurant: req.restaurant._id, branch: branch ? branch._id : null, phone: customerPhone.trim() },
+          {
+            $set: { name: customerName || 'Walk-in Customer', lastOrderAt: new Date() },
+            $inc: { totalOrders: 1, totalSpent: total },
+            $setOnInsert: { restaurant: req.restaurant._id, branch: branch ? branch._id : null, phone: customerPhone.trim() },
+          },
+          { upsert: true }
+        );
+      } catch (_) { /* non-critical */ }
     }
 
     const order = await Order.create({
       restaurant: req.restaurant._id,
+      branch: branch ? branch._id : undefined,
+      table: tableId || undefined,
+      tableNumber: (tableNumber || '').trim(),
       createdBy: req.user.id,
       orderType,
       paymentMethod,
@@ -211,18 +275,32 @@ router.post('/orders/:id/cancel', async (req, res, next) => {
 
     if (consumptionByInventoryId.size > 0) {
       const inventoryIds = Array.from(consumptionByInventoryId.keys());
-      const inventoryItems = await InventoryItem.find({
-        _id: { $in: inventoryIds },
-        restaurant: req.restaurant._id,
-      });
 
-      await Promise.all(
-        inventoryItems.map((inv) => {
-          const qty = consumptionByInventoryId.get(inv._id.toString()) || 0;
-          inv.currentStock += qty;
-          return inv.save();
-        })
-      );
+      if (order.branch) {
+        // Reverse BranchInventory
+        await Promise.all(
+          Array.from(consumptionByInventoryId.entries()).map(async ([invId, qty]) => {
+            await BranchInventory.findOneAndUpdate(
+              { branch: order.branch, inventoryItem: invId },
+              { $inc: { currentStock: qty } },
+              { upsert: false }
+            );
+          })
+        );
+      } else {
+        // Reverse restaurant-level InventoryItem
+        const inventoryItems = await InventoryItem.find({
+          _id: { $in: inventoryIds },
+          restaurant: req.restaurant._id,
+        });
+        await Promise.all(
+          inventoryItems.map((inv) => {
+            const qty = consumptionByInventoryId.get(inv._id.toString()) || 0;
+            inv.currentStock += qty;
+            return inv.save();
+          })
+        );
+      }
     }
 
     order.status = 'CANCELLED';

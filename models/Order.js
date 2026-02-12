@@ -31,6 +31,31 @@ const orderItemSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const appliedDealSchema = new mongoose.Schema(
+  {
+    deal: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Deal',
+      required: true,
+    },
+    dealName: {
+      type: String,
+      required: true,
+      // Snapshot of deal name for historical records
+    },
+    dealType: {
+      type: String,
+      required: true,
+    },
+    discountAmount: {
+      type: Number,
+      required: true,
+      min: 0,
+    },
+  },
+  { _id: false }
+);
+
 const orderSchema = new mongoose.Schema(
   {
     restaurant: {
@@ -38,6 +63,21 @@ const orderSchema = new mongoose.Schema(
       ref: 'Restaurant',
       required: true,
       index: true,
+    },
+    branch: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Branch',
+      default: null,
+      index: true,
+    },
+    table: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Table',
+      default: null,
+    },
+    tableNumber: {
+      type: String,
+      default: '',
     },
     createdBy: {
       type: mongoose.Schema.Types.ObjectId,
@@ -91,6 +131,12 @@ const orderSchema = new mongoose.Schema(
       required: true,
       min: 0,
       default: 0,
+    },
+    appliedDeals: [appliedDealSchema],
+    customer: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Customer',
+      default: null,
     },
     total: {
       type: Number,

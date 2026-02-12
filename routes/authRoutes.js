@@ -1,8 +1,11 @@
 const express = require('express');
 const User = require('../models/User');
 const Restaurant = require('../models/Restaurant');
+const Branch = require('../models/Branch');
+const UserBranch = require('../models/UserBranch');
 const generateToken = require('../utils/generateToken');
 const generateRefreshToken = require('../utils/generateRefreshToken');
+const { getBranchContext } = require('../middleware/authMiddleware');
 const jwt = require('jsonwebtoken');
 
 const router = express.Router();
@@ -39,6 +42,17 @@ router.post('/register', async (req, res, next) => {
       restaurant: restaurant ? restaurant._id : undefined,
     });
 
+    let defaultBranchId = null;
+    let allowedBranchIds = [];
+    if (user.restaurant) {
+      const branchCtx = await getBranchContext(
+        { id: user._id.toString(), role: user.role },
+        user.restaurant
+      );
+      defaultBranchId = branchCtx.defaultBranchId;
+      allowedBranchIds = branchCtx.allowedBranchIds;
+    }
+
     const token = generateToken(user, restaurant?.website?.subdomain || null);
     const refreshToken = generateRefreshToken(user);
 
@@ -51,6 +65,8 @@ router.post('/register', async (req, res, next) => {
         email: user.email,
         role: user.role,
         restaurant: user.restaurant,
+        defaultBranchId,
+        allowedBranchIds,
       },
     });
   } catch (error) {
@@ -81,11 +97,19 @@ router.post('/login', async (req, res, next) => {
 
     // Resolve restaurant to expose tenant slug (subdomain) for dashboard routing
     let restaurantSlug = null;
+    let defaultBranchId = null;
+    let allowedBranchIds = [];
     if (user.restaurant) {
       const restaurant = await Restaurant.findById(user.restaurant);
       if (restaurant?.website?.subdomain) {
         restaurantSlug = restaurant.website.subdomain;
       }
+      const branchCtx = await getBranchContext(
+        { id: user._id.toString(), role: user.role },
+        user.restaurant
+      );
+      defaultBranchId = branchCtx.defaultBranchId;
+      allowedBranchIds = branchCtx.allowedBranchIds;
     }
 
     const token = generateToken(user, restaurantSlug);
@@ -102,6 +126,8 @@ router.post('/login', async (req, res, next) => {
         role: user.role,
         restaurant: user.restaurant,
         restaurantSlug,
+        defaultBranchId,
+        allowedBranchIds,
       },
     });
   } catch (error) {
@@ -116,26 +142,34 @@ router.post('/register-restaurant', async (req, res, next) => {
   try {
     const {
       restaurantName,
-      subdomain,
       ownerName,
       email,
       password,
       phone,
+      branches, // [{ name, address? }] — at least one required
     } = req.body;
 
     // Validate required fields
-    if (!restaurantName || !subdomain || !ownerName || !email || !password) {
+    if (!restaurantName || !ownerName || !email || !password) {
       return res.status(400).json({ 
-        message: 'Please provide restaurant name, subdomain, owner name, email, and password' 
+        message: 'Please provide restaurant name, owner name, email, and password' 
       });
     }
 
-    // Check if subdomain is already taken
-    const existingSubdomain = await Restaurant.findOne({ 
-      'website.subdomain': subdomain.toLowerCase().trim() 
-    });
-    if (existingSubdomain) {
-      return res.status(400).json({ message: 'Subdomain already taken' });
+    if (!Array.isArray(branches) || branches.length === 0 || !branches[0]?.name?.trim()) {
+      return res.status(400).json({
+        message: 'Please provide at least one branch with a name (e.g. [{ name: "Downtown", address: "..." }])',
+      });
+    }
+
+    // Auto-generate unique subdomain from restaurant name
+    const slugify = (v) => v.toString().trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').substring(0, 50);
+    let baseSlug = slugify(restaurantName);
+    if (!baseSlug) baseSlug = 'restaurant';
+    let subdomain = baseSlug;
+    let slugCounter = 2;
+    while (await Restaurant.findOne({ 'website.subdomain': subdomain })) {
+      subdomain = `${baseSlug}-${slugCounter++}`;
     }
 
     // Check if email is already registered
@@ -152,7 +186,7 @@ router.post('/register-restaurant', async (req, res, next) => {
 
     const restaurant = await Restaurant.create({
       website: {
-        subdomain: subdomain.toLowerCase().trim(),
+        subdomain,
         name: restaurantName,
         contactPhone: phone || '',
         contactEmail: email.toLowerCase().trim(),
@@ -169,6 +203,30 @@ router.post('/register-restaurant', async (req, res, next) => {
       readonly: false,
     });
 
+    // Create all branches for this restaurant
+    const usedCodes = new Set();
+    const branchDocs = branches.map((b, idx) => {
+      let code = slugify(b.name) || 'branch';
+      // Ensure unique codes within this batch
+      let candidate = code;
+      let counter = 2;
+      while (usedCodes.has(candidate)) {
+        candidate = `${code}-${counter++}`;
+      }
+      usedCodes.add(candidate);
+      return {
+        restaurant: restaurant._id,
+        name: b.name.trim(),
+        code: candidate,
+        address: (b.address || '').trim(),
+        contactPhone: (b.contactPhone || phone || '').trim(),
+        contactEmail: (b.contactEmail || email.toLowerCase().trim()),
+        status: 'active',
+        sortOrder: idx,
+      };
+    });
+    const createdBranches = await Branch.insertMany(branchDocs);
+
     // Create the restaurant owner user (maps to restaurant_admin role in current RBAC)
     const adminUser = await User.create({
       name: ownerName,
@@ -177,6 +235,11 @@ router.post('/register-restaurant', async (req, res, next) => {
       role: 'restaurant_admin',
       restaurant: restaurant._id,
     });
+
+    const branchCtx = await getBranchContext(
+      { id: adminUser._id.toString(), role: adminUser.role },
+      restaurant._id
+    );
 
     // Generate token for immediate login
     const token = generateToken(adminUser, restaurant.website.subdomain);
@@ -191,14 +254,22 @@ router.post('/register-restaurant', async (req, res, next) => {
         email: adminUser.email,
         role: adminUser.role,
         restaurant: adminUser.restaurant,
+        defaultBranchId: branchCtx.defaultBranchId,
+        allowedBranchIds: branchCtx.allowedBranchIds,
       },
       restaurant: {
         id: restaurant._id,
         name: restaurant.website.name,
         subdomain: restaurant.website.subdomain,
-        trialStart: restaurant.subscription.trialStartsAt || trialStartsAt,
-        trialEnd: restaurant.subscription.trialEndsAt || trialEndsAt,
+        trialStart: restaurant.subscription.freeTrialStartDate,
+        trialEnd: restaurant.subscription.freeTrialEndDate,
       },
+      branches: createdBranches.map((b) => ({
+        id: b._id,
+        name: b.name,
+        code: b.code,
+        address: b.address || '',
+      })),
     });
   } catch (error) {
     // Handle rare race condition on unique slug index
@@ -237,9 +308,17 @@ router.post('/refresh', async (req, res, next) => {
     }
 
     let tenantSlug = null;
+    let defaultBranchId = null;
+    let allowedBranchIds = [];
     if (user.restaurant) {
       const rest = await Restaurant.findById(user.restaurant);
       if (rest?.website?.subdomain) tenantSlug = rest.website.subdomain;
+      const branchCtx = await getBranchContext(
+        { id: user._id.toString(), role: user.role },
+        user.restaurant
+      );
+      defaultBranchId = branchCtx.defaultBranchId;
+      allowedBranchIds = branchCtx.allowedBranchIds;
     }
 
     const newAccessToken = generateToken(user, tenantSlug);
@@ -248,6 +327,18 @@ router.post('/refresh', async (req, res, next) => {
     res.json({
       token: newAccessToken,
       refreshToken: newRefreshToken,
+      user: user.restaurant
+        ? {
+            id: user._id,
+            name: user.name,
+            email: user.email,
+            role: user.role,
+            restaurant: user.restaurant,
+            restaurantSlug: tenantSlug,
+            defaultBranchId,
+            allowedBranchIds,
+          }
+        : undefined,
     });
   } catch (error) {
     next(error);

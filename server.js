@@ -18,6 +18,8 @@ const uploadRoutes = require('./routes/uploadRoutes');
 const integrationRoutes = require('./routes/integrationRoutes');
 const subscriptionRoutes = require('./routes/subscriptionRoutes');
 const profileRoutes = require('./routes/profileRoutes');
+const dealRoutes = require('./routes/dealRoutes');
+const menuRoutes = require('./routes/menuRoutes');
 
 const app = express();
 
@@ -37,6 +39,8 @@ app.use('/api/integrations', integrationRoutes);
 app.use('/api', integrationRoutes); // mounts /api/webhooks/foodpanda/:restaurantId
 app.use('/api/subscription', subscriptionRoutes);
 app.use('/api/profile', profileRoutes);
+app.use('/api/deals', dealRoutes);
+app.use('/api/menu', menuRoutes);
 
 // Health check
 app.get('/health', (req, res) => {
@@ -53,7 +57,8 @@ const startServer = async () => {
   try {
     await connectDB(process.env.MONGO_URI);
     app.listen(PORT, () => {
-      console.log(`Server running on port ${PORT}`);
+      const url = `http://localhost:${PORT}`;
+      console.log(`Server running on port ${PORT} (${url})`);
     });
   } catch (error) {
     console.error('Failed to start server', error);

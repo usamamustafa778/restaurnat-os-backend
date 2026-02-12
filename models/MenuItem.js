@@ -46,6 +46,12 @@ const menuItemSchema = new mongoose.Schema(
       type: Boolean,
       default: true,
     },
+    availableAtAllBranches: {
+      type: Boolean,
+      default: true,
+      // If true, item is available at all branches by default (unless branch override disables it)
+      // If false, item must be explicitly enabled at each branch
+    },
     showOnWebsite: {
       type: Boolean,
       default: true,
