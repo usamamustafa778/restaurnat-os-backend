@@ -423,7 +423,16 @@ router.get('/menu', async (req, res, next) => {
       // Merge branch overrides when viewing a specific branch
       if (branchId) {
         const override = overrideMap.get(item._id.toString());
-        result.branchAvailable = override ? override.available : true;
+        
+        // Calculate branch availability:
+        // 1. If item is NOT available at all branches, start with false
+        // 2. Override takes precedence if it exists
+        let branchAvailable = item.availableAtAllBranches !== false ? item.available : false;
+        if (override) {
+          branchAvailable = override.available;
+        }
+        
+        result.branchAvailable = branchAvailable;
         result.branchPriceOverride = override?.priceOverride ?? null;
         // effective price for this branch
         result.effectivePrice = override?.priceOverride != null ? override.priceOverride : item.price;
@@ -432,9 +441,22 @@ router.get('/menu', async (req, res, next) => {
       return result;
     });
 
+    // Filter out items not available at this branch
+    let filteredItems = mappedItems;
+    if (branchId) {
+      // When viewing a specific branch, only show items that are available at that branch
+      // This means:
+      // 1. Items with availableAtAllBranches=true (unless overridden to false)
+      // 2. Items with availableAtAllBranches=false AND a branch override with available=true
+      filteredItems = mappedItems.filter(item => {
+        // If branchAvailable is false, don't show it
+        return item.branchAvailable !== false;
+      });
+    }
+
     res.json({
       categories: categories.map(mapCategory),
-      items: mappedItems,
+      items: filteredItems,
     });
   } catch (error) {
     next(error);
