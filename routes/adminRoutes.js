@@ -1071,7 +1071,10 @@ router.get('/website', async (req, res, next) => {
       return res.status(404).json({ message: 'Restaurant not found' });
     }
 
-    res.json(restaurant.website);
+    const raw = restaurant.website || {};
+    const website = typeof raw.toObject === 'function' ? raw.toObject() : { ...raw };
+    delete website.openingHours;
+    res.json(website);
   } catch (error) {
     next(error);
   }
@@ -1095,7 +1098,7 @@ router.put('/website', async (req, res, next) => {
       heroSlides,
       socialMedia,
       themeColors,
-      openingHours,
+      openingHoursText,
       websiteSections,
       allowWebsiteOrders,
     } = req.body;
@@ -1125,13 +1128,20 @@ router.put('/website', async (req, res, next) => {
     if (heroSlides !== undefined) restaurant.website.heroSlides = heroSlides;
     if (socialMedia !== undefined) restaurant.website.socialMedia = socialMedia;
     if (themeColors !== undefined) restaurant.website.themeColors = themeColors;
-    if (openingHours !== undefined) restaurant.website.openingHours = openingHours;
+    if (openingHoursText !== undefined) {
+      restaurant.website.openingHoursText = openingHoursText;
+      restaurant.website.openingHours = {};
+    }
     if (websiteSections !== undefined) restaurant.website.websiteSections = websiteSections;
     if (typeof allowWebsiteOrders === 'boolean') restaurant.website.allowWebsiteOrders = allowWebsiteOrders;
 
+    restaurant.markModified('website');
     await restaurant.save();
 
-    res.json(restaurant.website);
+    const updated = restaurant.website || {};
+    const out = typeof updated.toObject === 'function' ? updated.toObject() : { ...updated };
+    delete out.openingHours;
+    res.json(out);
   } catch (error) {
     next(error);
   }

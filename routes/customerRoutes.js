@@ -170,7 +170,7 @@ router.get('/menu', async (req, res, next) => {
         heroSlides: restaurant.website?.heroSlides || [],
         socialMedia: restaurant.website?.socialMedia || {},
         themeColors: restaurant.website?.themeColors || { primary: '#EF4444', secondary: '#FFA500' },
-        openingHours: restaurant.website?.openingHours || {},
+        openingHoursText: restaurant.website?.openingHoursText || '',
         websiteSections,
         allowWebsiteOrders: restaurant.website?.allowWebsiteOrders !== false,
       },

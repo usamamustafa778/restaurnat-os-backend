@@ -86,7 +86,7 @@ const websiteSettingsSchema = new mongoose.Schema(
       primary: { type: String, default: '#EF4444' },
       secondary: { type: String, default: '#FFA500' },
     },
-    // Opening Hours
+    // Opening Hours – structured (legacy) or free-text paragraph
     openingHours: {
       monday: { type: String, default: '9:00 AM - 10:00 PM' },
       tuesday: { type: String, default: '9:00 AM - 10:00 PM' },
@@ -96,6 +96,7 @@ const websiteSettingsSchema = new mongoose.Schema(
       saturday: { type: String, default: '10:00 AM - 11:00 PM' },
       sunday: { type: String, default: '10:00 AM - 11:00 PM' },
     },
+    openingHoursText: { type: String },
     // Allow customers to place orders from the public website
     allowWebsiteOrders: {
       type: Boolean,
