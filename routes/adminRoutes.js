@@ -259,22 +259,29 @@ const mapCategory = (category) => ({
   createdAt: category.createdAt.toISOString().slice(0, 10),
 });
 
-const mapMenuItem = (item) => ({
-  id: item._id.toString(),
-  name: item.name,
-  price: item.price,
-  categoryId: item.category.toString(),
-  available: item.available,
-  showOnWebsite: item.showOnWebsite,
-  imageUrl: item.imageUrl || '',
-  description: item.description || '',
-  isFeatured: item.isFeatured || false,
-  isBestSeller: item.isBestSeller || false,
-  inventoryConsumptions: (item.inventoryConsumptions || []).map((c) => ({
-    inventoryItem: c.inventoryItem.toString(),
-    quantity: c.quantity,
-  })),
-});
+const mapMenuItem = (item, options) => {
+  const invUnitMap = options?.invUnitMap;
+  return {
+    id: item._id.toString(),
+    name: item.name,
+    price: item.price,
+    categoryId: item.category.toString(),
+    available: item.available,
+    showOnWebsite: item.showOnWebsite,
+    imageUrl: item.imageUrl || '',
+    description: item.description || '',
+    isFeatured: item.isFeatured || false,
+    isBestSeller: item.isBestSeller || false,
+    inventoryConsumptions: (item.inventoryConsumptions || []).map((c) => {
+      const invId = c.inventoryItem?.toString?.();
+      return {
+        inventoryItem: invId,
+        quantity: c.quantity,
+        ...(invUnitMap && invId ? { unit: invUnitMap.get(invId) || 'gram' } : {}),
+      };
+    }),
+  };
+};
 
 const mapUser = (user, branchAssignments) => {
   const base = {
@@ -395,10 +402,24 @@ router.get('/menu', async (req, res, next) => {
       InventoryItem.find({ restaurant: restaurantId }),
     ]);
 
-    // Build inventory lookup map
+    const invUnitMap = new Map(inventoryItems.map((inv) => [inv._id.toString(), inv.unit || 'gram']));
+
+    // Build inventory lookup map: use branch-level stock when a branch is selected
     const inventoryMap = new Map();
-    for (const inv of inventoryItems) {
-      inventoryMap.set(inv._id.toString(), inv);
+    if (branchId) {
+      const branchRows = await BranchInventory.find({ branch: branchId }).lean();
+      const branchStockByInv = new Map();
+      for (const row of branchRows) {
+        branchStockByInv.set(row.inventoryItem.toString(), row.currentStock);
+      }
+      for (const inv of inventoryItems) {
+        const currentStock = branchStockByInv.get(inv._id.toString()) ?? 0;
+        inventoryMap.set(inv._id.toString(), { name: inv.name, currentStock });
+      }
+    } else {
+      for (const inv of inventoryItems) {
+        inventoryMap.set(inv._id.toString(), inv);
+      }
     }
 
     // Load branch overrides if a branch is selected
@@ -412,7 +433,7 @@ router.get('/menu', async (req, res, next) => {
 
     // Map items with inventory sufficiency info + branch overrides
     const mappedItems = items.map((item) => {
-      const base = mapMenuItem(item);
+      const base = mapMenuItem(item, { invUnitMap });
       const { sufficient, insufficientItems } = checkInventorySufficiency(item, inventoryMap);
       const result = {
         ...base,
@@ -527,6 +548,32 @@ router.put('/orders/:id/status', async (req, res, next) => {
   }
 });
 
+// @route   DELETE /api/admin/orders/:id
+// @desc    Delete an order (find by _id or orderNumber; restaurant-scoped)
+// @access  Restaurant Admin / Super Admin
+router.delete('/orders/:id', async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const restaurantId = getRestaurantIdForRequest(req);
+
+    let order = null;
+    if (id.match(/^[0-9a-fA-F]{24}$/)) {
+      order = await Order.findOne({ _id: id, restaurant: restaurantId });
+    }
+    if (!order) {
+      order = await Order.findOne({ orderNumber: id, restaurant: restaurantId });
+    }
+    if (!order) {
+      return res.status(404).json({ message: 'Order not found' });
+    }
+
+    await Order.deleteOne({ _id: order._id });
+    res.json({ message: 'Order deleted', id: order.orderNumber || order._id.toString() });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // CATEGORY ROUTES
 
 // @route   POST /api/admin/categories
@@ -625,32 +672,40 @@ router.delete('/categories/:id', async (req, res, next) => {
 
 // MENU ITEM ROUTES
 
+const VALID_OBJECTID = /^[a-f0-9]{24}$/i;
+
 const normalizeInventoryConsumptions = async (restaurantId, rawConsumptions) => {
   if (!Array.isArray(rawConsumptions) || rawConsumptions.length === 0) {
     return [];
   }
 
-  const inventoryIds = rawConsumptions.map((c) => c.inventoryItemId).filter(Boolean);
-  if (inventoryIds.length === 0) {
-    return [];
+  // Normalize and merge duplicate inventoryItemIds (sum quantities); only accept valid ObjectId strings
+  const merged = new Map();
+  for (const c of rawConsumptions) {
+    const id = c.inventoryItemId != null ? String(c.inventoryItemId).trim() : '';
+    if (!id || !VALID_OBJECTID.test(id)) continue;
+    const qty = Number(c.quantity) || 0;
+    if (qty <= 0) continue;
+    merged.set(id, (merged.get(id) || 0) + qty);
   }
+  const uniqueIds = [...merged.keys()];
+  if (uniqueIds.length === 0) return [];
 
   const inventoryItems = await InventoryItem.find({
-    _id: { $in: inventoryIds },
+    _id: { $in: uniqueIds },
     restaurant: restaurantId,
   });
 
-  if (inventoryItems.length !== inventoryIds.length) {
+  const foundIds = new Set(inventoryItems.map((i) => i._id.toString()));
+  const missing = uniqueIds.filter((id) => !foundIds.has(id));
+  if (missing.length > 0) {
     throw new Error('One or more inventory items are invalid for this restaurant');
   }
 
-  const validIds = new Set(inventoryItems.map((i) => i._id.toString()));
-
-  return rawConsumptions
-    .filter((c) => c.inventoryItemId && validIds.has(c.inventoryItemId))
-    .map((c) => ({
-      inventoryItem: c.inventoryItemId,
-      quantity: Number(c.quantity) || 0,
+  return uniqueIds
+    .map((id) => ({
+      inventoryItem: id,
+      quantity: parseFloat(Number(merged.get(id)).toFixed(6)),
     }))
     .filter((c) => c.quantity > 0);
 };
@@ -1188,11 +1243,45 @@ router.get('/reports/sales', async (req, res, next) => {
     const orders = await Order.find(orderFilter);
 
     let totalRevenue = 0;
+    let totalProfit = 0;
     let totalOrders = orders.length;
     const itemStats = new Map();
 
+    // Recompute profit for orders that don't have it (e.g. created before profit was stored)
+    const ordersMissingProfit = orders.filter((o) => o.profit == null || o.profit === 0);
+    let menuMapForCost = new Map();
+    let invCostMapForReport = new Map();
+    if (ordersMissingProfit.length > 0) {
+      const menuItemIds = [...new Set(ordersMissingProfit.flatMap((o) => o.items.map((i) => i.menuItem)))];
+      const menuItems = await MenuItem.find({ _id: { $in: menuItemIds }, restaurant: restaurantId });
+      for (const m of menuItems) menuMapForCost.set(m._id.toString(), m);
+      const invIds = [...new Set(menuItems.flatMap((m) => (m.inventoryConsumptions || []).map((c) => c.inventoryItem?.toString?.()).filter(Boolean)))];
+      if (invIds.length > 0) {
+        const itemDefs = await InventoryItem.find({ _id: { $in: invIds }, restaurant: restaurantId }).select('_id unit costPrice').lean();
+        for (const d of itemDefs) invCostMapForReport.set(d._id.toString(), { costPrice: d.costPrice || 0, unit: d.unit || 'gram' });
+        if (branchId) {
+          const branchRows = await BranchInventory.find({ branch: branchId, inventoryItem: { $in: invIds } }).select('inventoryItem costPrice').lean();
+          for (const r of branchRows) {
+            const id = r.inventoryItem.toString();
+            if (invCostMapForReport.has(id)) invCostMapForReport.set(id, { ...invCostMapForReport.get(id), costPrice: r.costPrice ?? 0 });
+          }
+        }
+      }
+    }
+
     for (const order of orders) {
       totalRevenue += order.total;
+      if (order.profit != null && order.profit !== 0) {
+        totalProfit += order.profit;
+      } else if (ordersMissingProfit.length > 0 && invCostMapForReport.size > 0) {
+        let orderCost = 0;
+        for (const orderItem of order.items) {
+          const menu = menuMapForCost.get(orderItem.menuItem.toString());
+          if (!menu) continue;
+          orderCost += computeItemCost(menu, invCostMapForReport) * orderItem.quantity;
+        }
+        totalProfit += order.total - orderCost;
+      }
       for (const item of order.items) {
         const key = item.menuItem.toString();
         const existing = itemStats.get(key) || {
@@ -1211,6 +1300,7 @@ router.get('/reports/sales', async (req, res, next) => {
       from: fromDate,
       to: toDate,
       totalRevenue,
+      totalProfit,
       totalOrders,
       topItems: Array.from(itemStats.values()).sort((a, b) => b.quantity - a.quantity),
     });

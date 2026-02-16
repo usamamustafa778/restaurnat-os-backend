@@ -43,6 +43,24 @@ const generateOrderNumber = async (restaurantId) => {
   return `${prefix}${nextSeq.toString().padStart(4, '0')}`;
 };
 
+// Cost per single unit of a menu item from inventory consumptions (costPrice per 1000g/1000ml/12pc)
+function getMenuItemIngredientCost(menuItem, inventoryMap) {
+  if (!menuItem?.inventoryConsumptions?.length) return 0;
+  let cost = 0;
+  for (const c of menuItem.inventoryConsumptions) {
+    const invId = c.inventoryItem?.toString?.();
+    if (!invId) continue;
+    const inv = inventoryMap.get(invId);
+    if (!inv || inv.costPrice == null) continue;
+    const qty = c.quantity || 0;
+    const unit = (inv.unit || '').toLowerCase();
+    if (unit === 'gram' || unit === 'kg') cost += (qty / 1000) * inv.costPrice;
+    else if (unit === 'ml' || unit === 'liter') cost += (qty / 1000) * inv.costPrice;
+    else if (unit === 'piece') cost += (qty / 12) * inv.costPrice;
+  }
+  return cost;
+}
+
 // @route   POST /api/pos/orders
 // @desc    Create and complete a new POS order (branchId required when restaurant has branches)
 // @access  Staff / Restaurant Admin
@@ -205,6 +223,34 @@ router.post('/orders', async (req, res, next) => {
       } catch (_) { /* non-critical */ }
     }
 
+    // Compute ingredient cost and profit (sale price - ingredient cost at time of order)
+    let ingredientCost = 0;
+    const invIds = Array.from(consumptionByInventoryId.keys());
+    if (invIds.length > 0) {
+      const itemDefs = await InventoryItem.find({ _id: { $in: invIds }, restaurant: req.restaurant._id })
+        .select('_id unit costPrice')
+        .lean();
+      const invCostMap = new Map();
+      for (const d of itemDefs) {
+        invCostMap.set(d._id.toString(), { costPrice: d.costPrice || 0, unit: d.unit || 'gram' });
+      }
+      if (branch) {
+        const branchInvRows = await BranchInventory.find({ branch: branch._id, inventoryItem: { $in: invIds } })
+          .select('inventoryItem costPrice')
+          .lean();
+        for (const r of branchInvRows) {
+          const id = r.inventoryItem.toString();
+          if (invCostMap.has(id)) invCostMap.set(id, { ...invCostMap.get(id), costPrice: r.costPrice ?? 0 });
+        }
+      }
+      for (const orderItem of orderItems) {
+        const menu = menuMap.get(orderItem.menuItem.toString());
+        if (!menu) continue;
+        ingredientCost += getMenuItemIngredientCost(menu, invCostMap) * orderItem.quantity;
+      }
+    }
+    const profit = Math.round((total - ingredientCost) * 100) / 100;
+
     const order = await Order.create({
       restaurant: req.restaurant._id,
       branch: branch ? branch._id : undefined,
@@ -218,6 +264,8 @@ router.post('/orders', async (req, res, next) => {
       subtotal,
       discountAmount: discount,
       total,
+      ingredientCost,
+      profit,
       customerName: customerName || '',
       customerPhone: customerPhone || '',
       deliveryAddress: deliveryAddress || '',

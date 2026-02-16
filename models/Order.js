@@ -148,6 +148,15 @@ const orderSchema = new mongoose.Schema(
       required: true,
       unique: true,
     },
+    ingredientCost: {
+      type: Number,
+      min: 0,
+      default: 0,
+    },
+    profit: {
+      type: Number,
+      default: 0,
+    },
   },
   {
     timestamps: true,
