@@ -79,6 +79,10 @@ const orderSchema = new mongoose.Schema(
       type: String,
       default: '',
     },
+    tableName: {
+      type: String,
+      default: '',
+    },
     createdBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
@@ -91,9 +95,11 @@ const orderSchema = new mongoose.Schema(
     },
     paymentMethod: {
       type: String,
-      enum: ['CASH', 'CARD', 'ONLINE', 'OTHER'],
-      required: true,
+      enum: ['PENDING', 'CASH', 'CARD', 'ONLINE', 'OTHER'],
+      default: 'PENDING',
     },
+    paymentAmountReceived: { type: Number, default: null },
+    paymentAmountReturned: { type: Number, default: null },
     status: {
       type: String,
       enum: ['UNPROCESSED', 'PENDING', 'READY', 'COMPLETED', 'CANCELLED'],

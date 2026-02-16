@@ -60,7 +60,7 @@ const posDraftSchema = new mongoose.Schema(
     items: [draftItemSchema],
     orderType: {
       type: String,
-      enum: ['DINE_IN', 'TAKEAWAY', 'DELIVERY', 'TABLE'],
+      enum: ['DINE_IN', 'TAKEAWAY', 'DELIVERY'],
       default: 'DINE_IN',
     },
     customerName: {
@@ -96,6 +96,10 @@ const posDraftSchema = new mongoose.Schema(
       default: {},
     },
     tableNumber: {
+      type: String,
+      default: '',
+    },
+    tableName: {
       type: String,
       default: '',
     },

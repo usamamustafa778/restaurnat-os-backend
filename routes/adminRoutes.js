@@ -262,21 +262,21 @@ const mapCategory = (category) => ({
 const mapMenuItem = (item, options) => {
   const invUnitMap = options?.invUnitMap;
   return {
-    id: item._id.toString(),
-    name: item.name,
-    price: item.price,
-    categoryId: item.category.toString(),
-    available: item.available,
-    showOnWebsite: item.showOnWebsite,
-    imageUrl: item.imageUrl || '',
-    description: item.description || '',
-    isFeatured: item.isFeatured || false,
-    isBestSeller: item.isBestSeller || false,
+  id: item._id.toString(),
+  name: item.name,
+  price: item.price,
+  categoryId: item.category.toString(),
+  available: item.available,
+  showOnWebsite: item.showOnWebsite,
+  imageUrl: item.imageUrl || '',
+  description: item.description || '',
+  isFeatured: item.isFeatured || false,
+  isBestSeller: item.isBestSeller || false,
     inventoryConsumptions: (item.inventoryConsumptions || []).map((c) => {
       const invId = c.inventoryItem?.toString?.();
       return {
         inventoryItem: invId,
-        quantity: c.quantity,
+    quantity: c.quantity,
         ...(invUnitMap && invId ? { unit: invUnitMap.get(invId) || 'gram' } : {}),
       };
     }),
@@ -285,12 +285,12 @@ const mapMenuItem = (item, options) => {
 
 const mapUser = (user, branchAssignments) => {
   const base = {
-    id: user._id.toString(),
-    name: user.name,
-    email: user.email,
-    role: user.role,
-    profileImageUrl: user.profileImageUrl || null,
-    createdAt: user.createdAt.toISOString(),
+  id: user._id.toString(),
+  name: user.name,
+  email: user.email,
+  role: user.role,
+  profileImageUrl: user.profileImageUrl || null,
+  createdAt: user.createdAt.toISOString(),
   };
   if (branchAssignments) {
     base.branches = branchAssignments.map((a) => ({
@@ -326,7 +326,7 @@ const mapOrder = (order) => {
     customerName = order.source === 'FOODPANDA' ? 'Foodpanda Customer' : 'Walk\u2011in Customer';
   }
 
-  const paymentLabels = { CASH: 'Cash', CARD: 'Card', ONLINE: 'Online', OTHER: 'Other' };
+  const paymentLabels = { PENDING: 'To be paid', CASH: 'Cash', CARD: 'Card', ONLINE: 'Online', OTHER: 'Other' };
 
   return {
     id: order.orderNumber || order._id.toString(),
@@ -335,6 +335,7 @@ const mapOrder = (order) => {
     customerPhone: order.customerPhone || '',
     deliveryAddress: order.deliveryAddress || '',
     tableNumber: order.tableNumber || '',
+    tableName: order.tableName || '',
     tableId: order.table ? order.table.toString() : null,
     total: order.total,
     subtotal: order.subtotal,
@@ -342,6 +343,7 @@ const mapOrder = (order) => {
     status: order.status,
     createdAt: order.createdAt,
     items: (order.items || []).map((i) => ({
+      menuItemId: i.menuItem ? i.menuItem.toString() : null,
       name: i.name,
       qty: i.quantity,
       unitPrice: i.unitPrice,
@@ -357,8 +359,10 @@ const mapOrder = (order) => {
         : 'dine-in',
     source: order.source || 'POS',
     externalOrderId: order.externalOrderId || '',
-    paymentMethod: paymentLabels[order.paymentMethod] || order.paymentMethod || 'Cash',
+    paymentMethod: paymentLabels[order.paymentMethod] || order.paymentMethod || 'To be paid',
     paymentStatus: order.status === 'COMPLETED' ? 'PAID' : 'UNPAID',
+    paymentAmountReceived: order.paymentAmountReceived ?? null,
+    paymentAmountReturned: order.paymentAmountReturned ?? null,
   };
 };
 
@@ -514,6 +518,101 @@ router.get('/orders', async (req, res, next) => {
   }
 });
 
+// @route   GET /api/admin/orders/:id
+// @desc    Get single order by _id or orderNumber (for edit)
+// @access  Restaurant Admin / Staff / Super Admin
+router.get('/orders/:id', async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const restaurantId = getRestaurantIdForRequest(req);
+
+    let order = null;
+    if (id.match(/^[0-9a-fA-F]{24}$/)) {
+      order = await Order.findOne({ _id: id, restaurant: restaurantId }).populate('createdBy', 'name');
+    }
+    if (!order) {
+      order = await Order.findOne({ orderNumber: id, restaurant: restaurantId }).populate('createdBy', 'name');
+    }
+    if (!order) {
+      return res.status(404).json({ message: 'Order not found' });
+    }
+    res.json(mapOrder(order));
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @route   PUT /api/admin/orders/:id
+// @desc    Update order (items, discount, customer, orderType, tableName) – for edit from POS
+// @access  Restaurant Admin / Staff / Super Admin
+router.put('/orders/:id', async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { items, discountAmount, customerName, customerPhone, deliveryAddress, orderType, tableName } = req.body;
+    const restaurantId = getRestaurantIdForRequest(req);
+
+    let order = await Order.findOne({ _id: id, restaurant: restaurantId });
+    if (!order) {
+      order = await Order.findOne({ orderNumber: id, restaurant: restaurantId });
+    }
+    if (!order) {
+      return res.status(404).json({ message: 'Order not found' });
+    }
+    if (order.status === 'CANCELLED') {
+      return res.status(400).json({ message: 'Cannot update cancelled order' });
+    }
+
+    if (Array.isArray(items) && items.length > 0) {
+      const menuItemIds = items.map((i) => i.menuItemId).filter(Boolean);
+      const dbMenuItems = await MenuItem.find({
+        _id: { $in: menuItemIds },
+        restaurant: restaurantId,
+      }).lean();
+      const menuMap = new Map(dbMenuItems.map((m) => [m._id.toString(), m]));
+
+      const orderItems = [];
+      let subtotal = 0;
+      for (const i of items) {
+        const menu = i.menuItemId ? menuMap.get(i.menuItemId) : null;
+        const qty = Math.max(1, Number(i.quantity) || 1);
+        const unitPrice = menu ? menu.price : (Number(i.unitPrice) || 0);
+        const lineTotal = unitPrice * qty;
+        subtotal += lineTotal;
+        orderItems.push({
+          menuItem: i.menuItemId || null,
+          name: menu ? menu.name : (i.name || 'Item'),
+          quantity: qty,
+          unitPrice,
+          lineTotal,
+        });
+      }
+      const discount = Math.max(0, Number(discountAmount) ?? order.discountAmount ?? 0);
+      const total = Math.max(0, subtotal - discount);
+
+      order.items = orderItems;
+      order.subtotal = subtotal;
+      order.discountAmount = discount;
+      order.total = total;
+    }
+
+    if (discountAmount !== undefined && !(Array.isArray(items) && items.length > 0)) {
+      order.discountAmount = Math.max(0, Number(discountAmount) || 0);
+      order.total = Math.max(0, (order.subtotal || 0) - order.discountAmount);
+    }
+    if (customerName !== undefined) order.customerName = String(customerName || '').trim();
+    if (customerPhone !== undefined) order.customerPhone = String(customerPhone || '').trim();
+    if (deliveryAddress !== undefined) order.deliveryAddress = String(deliveryAddress || '').trim();
+    if (orderType !== undefined && ['DINE_IN', 'TAKEAWAY', 'DELIVERY'].includes(orderType)) order.orderType = orderType;
+    if (tableName !== undefined) order.tableName = String(tableName || '').trim();
+
+    await order.save();
+    const updated = await Order.findById(order._id).populate('createdBy', 'name');
+    res.json(mapOrder(updated));
+  } catch (error) {
+    next(error);
+  }
+});
+
 // @route   PUT /api/admin/orders/:id/status
 // @desc    Update order status (find by restaurant; branch optional for legacy orders)
 // @access  Restaurant Admin / Staff / Super Admin
@@ -541,6 +640,81 @@ router.put('/orders/:id/status', async (req, res, next) => {
 
     order.status = status;
     await order.save();
+
+    // When order is completed or cancelled, free the table (set isAvailable = true)
+    if ((status === 'COMPLETED' || status === 'CANCELLED') && order.tableName && order.tableName.trim()) {
+      await Table.findOneAndUpdate(
+        { restaurant: order.restaurant, branch: order.branch || null, name: order.tableName.trim() },
+        { $set: { isAvailable: true } }
+      );
+    }
+
+    res.json(mapOrder(order));
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @route   PUT /api/admin/orders/:id/payment
+// @desc    Record payment (cashier): set paymentMethod, for CASH record amountReceived and change returned; set status to COMPLETED
+// @access  Restaurant Admin / Staff / Super Admin
+router.put('/orders/:id/payment', async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { paymentMethod, amountReceived, amountReturned } = req.body;
+    const restaurantId = getRestaurantIdForRequest(req);
+
+    if (!['CASH', 'CARD'].includes(paymentMethod)) {
+      return res.status(400).json({ message: 'Invalid paymentMethod; use CASH or CARD' });
+    }
+
+    let order;
+    if (id.match(/^[0-9a-fA-F]{24}$/)) {
+      order = await Order.findOne({ _id: id, restaurant: restaurantId }).populate('createdBy', 'name');
+    }
+    if (!order) {
+      order = await Order.findOne({ orderNumber: id, restaurant: restaurantId }).populate('createdBy', 'name');
+    }
+    if (!order) {
+      return res.status(404).json({ message: 'Order not found' });
+    }
+
+    if (order.status === 'CANCELLED') {
+      return res.status(400).json({ message: 'Cannot record payment for cancelled order' });
+    }
+
+    const billTotal = order.total;
+    let received = amountReceived != null ? Number(amountReceived) : null;
+    let returned = amountReturned != null ? Number(amountReturned) : null;
+
+    if (paymentMethod === 'CASH') {
+      if (received == null || isNaN(received) || received < 0) {
+        return res.status(400).json({ message: 'For cash payment, amountReceived is required and must be >= 0' });
+      }
+      if (received < billTotal) {
+        return res.status(400).json({ message: `Amount received (${received}) is less than bill total (${billTotal})` });
+      }
+      returned = returned != null && !isNaN(returned) ? returned : (received - billTotal);
+    } else {
+      received = null;
+      returned = null;
+    }
+
+    const wasAlreadyCompleted = order.status === 'COMPLETED';
+    order.paymentMethod = paymentMethod;
+    order.paymentAmountReceived = received;
+    order.paymentAmountReturned = returned;
+    if (!wasAlreadyCompleted) {
+      order.status = 'COMPLETED';
+    }
+    await order.save();
+
+    if (!wasAlreadyCompleted && order.tableName && order.tableName.trim()) {
+      await Table.findOneAndUpdate(
+        { restaurant: order.restaurant, branch: order.branch || null, name: order.tableName.trim() },
+        { $set: { isAvailable: true } }
+      );
+    }
 
     res.json(mapOrder(order));
   } catch (error) {
@@ -942,16 +1116,16 @@ router.get('/inventory', async (req, res, next) => {
       );
     } else {
       // Fallback: restaurant-level stock (legacy / owner overview)
-      res.json(
-        items.map((i) => ({
-          id: i._id.toString(),
-          name: i.name,
-          unit: i.unit,
-          currentStock: i.currentStock,
-          lowStockThreshold: i.lowStockThreshold,
+    res.json(
+      items.map((i) => ({
+        id: i._id.toString(),
+        name: i.name,
+        unit: i.unit,
+        currentStock: i.currentStock,
+        lowStockThreshold: i.lowStockThreshold,
           costPrice: i.costPrice || 0,
-        }))
-      );
+      }))
+    );
     }
   } catch (error) {
     next(error);
@@ -994,10 +1168,10 @@ router.post('/inventory', async (req, res, next) => {
       branchRecord = await BranchInventory.create({
         branch: branchId,
         inventoryItem: item._id,
-        currentStock: initialStock ?? 0,
-        lowStockThreshold: lowStockThreshold ?? 0,
+      currentStock: initialStock ?? 0,
+      lowStockThreshold: lowStockThreshold ?? 0,
         costPrice: costPrice ?? 0,
-      });
+    });
     }
 
     res.status(201).json({
@@ -1069,22 +1243,22 @@ router.put('/inventory/:id', async (req, res, next) => {
       });
     } else {
       // No branch: update restaurant-level stock (legacy)
-      if (lowStockThreshold !== undefined) item.lowStockThreshold = lowStockThreshold;
+    if (lowStockThreshold !== undefined) item.lowStockThreshold = lowStockThreshold;
       if (costPrice !== undefined) item.costPrice = costPrice;
-      if (stockAdjustment !== undefined) {
-        const adj = Number(stockAdjustment) || 0;
-        item.currentStock = Math.max(0, item.currentStock + adj);
-      }
-      await item.save();
+    if (stockAdjustment !== undefined) {
+      const adj = Number(stockAdjustment) || 0;
+      item.currentStock = Math.max(0, item.currentStock + adj);
+    }
+    await item.save();
 
-      res.json({
-        id: item._id.toString(),
-        name: item.name,
-        unit: item.unit,
-        currentStock: item.currentStock,
-        lowStockThreshold: item.lowStockThreshold,
+    res.json({
+      id: item._id.toString(),
+      name: item.name,
+      unit: item.unit,
+      currentStock: item.currentStock,
+      lowStockThreshold: item.lowStockThreshold,
         costPrice: item.costPrice || 0,
-      });
+    });
     }
   } catch (error) {
     next(error);
@@ -1246,6 +1420,7 @@ router.get('/reports/sales', async (req, res, next) => {
     let totalProfit = 0;
     let totalOrders = orders.length;
     const itemStats = new Map();
+    const dailyMap = new Map(); // date YYYY-MM-DD -> total sales
 
     // Recompute profit for orders that don't have it (e.g. created before profit was stored)
     const ordersMissingProfit = orders.filter((o) => o.profit == null || o.profit === 0);
@@ -1271,6 +1446,8 @@ router.get('/reports/sales', async (req, res, next) => {
 
     for (const order of orders) {
       totalRevenue += order.total;
+      const dateKey = new Date(order.createdAt).toISOString().slice(0, 10);
+      dailyMap.set(dateKey, (dailyMap.get(dateKey) || 0) + order.total);
       if (order.profit != null && order.profit !== 0) {
         totalProfit += order.profit;
       } else if (ordersMissingProfit.length > 0 && invCostMapForReport.size > 0) {
@@ -1296,6 +1473,19 @@ router.get('/reports/sales', async (req, res, next) => {
       }
     }
 
+    // Daily sales for chart: one entry per day in [fromDate, toDate)
+    const dailySales = [];
+    const dayMs = 24 * 60 * 60 * 1000;
+    for (let t = fromDate.getTime(); t < toDate.getTime(); t += dayMs) {
+      const d = new Date(t);
+      const dateKey = d.toISOString().slice(0, 10);
+      dailySales.push({
+        day: d.getUTCDate(),
+        date: dateKey,
+        sales: Math.round(dailyMap.get(dateKey) || 0),
+      });
+    }
+
     res.json({
       from: fromDate,
       to: toDate,
@@ -1303,6 +1493,7 @@ router.get('/reports/sales', async (req, res, next) => {
       totalProfit,
       totalOrders,
       topItems: Array.from(itemStats.values()).sort((a, b) => b.quantity - a.quantity),
+      dailySales,
     });
   } catch (error) {
     next(error);
@@ -1424,15 +1615,26 @@ router.get('/dashboard/summary', async (req, res, next) => {
     const orderFilter = { restaurant: restaurantId, createdAt: { $gte: startOfDay, $lte: endOfDay } };
     if (branchId) orderFilter.branch = branchId;
 
-    const [allTodayOrders, inventoryItems, allMenuItems, categories] = await Promise.all([
+    const pendingFilter = { restaurant: restaurantId, status: { $in: ['UNPROCESSED', 'PENDING', 'READY'] } };
+    if (branchId) pendingFilter.branch = branchId;
+
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+    sevenDaysAgo.setHours(0, 0, 0, 0);
+    const orderFilterLast7 = { restaurant: restaurantId, status: 'COMPLETED', createdAt: { $gte: sevenDaysAgo, $lte: endOfDay } };
+    if (branchId) orderFilterLast7.branch = branchId;
+
+    const [allTodayOrders, pendingOrdersList, completedLast7, inventoryItems, allMenuItems, categories] = await Promise.all([
       Order.find(orderFilter),
+      Order.find(pendingFilter),
+      Order.find(orderFilterLast7),
       InventoryItem.find({ restaurant: restaurantId }),
       MenuItem.find({ restaurant: restaurantId }),
       Category.find({ restaurant: restaurantId }),
     ]);
 
     const completedOrders = allTodayOrders.filter(o => o.status === 'COMPLETED');
-    const pendingOrders = allTodayOrders.filter(o => ['UNPROCESSED', 'PENDING', 'READY'].includes(o.status));
+    const pendingOrders = pendingOrdersList;
     const todaysRevenue = completedOrders.reduce((s, o) => s + o.total, 0);
     const todaysOrdersCount = completedOrders.length;
 
@@ -1465,7 +1667,7 @@ router.get('/dashboard/summary', async (req, res, next) => {
         }));
     } else {
       lowStockItems = inventoryItems
-        .filter((i) => i.lowStockThreshold > 0 && i.currentStock <= i.lowStockThreshold)
+      .filter((i) => i.lowStockThreshold > 0 && i.currentStock <= i.lowStockThreshold)
         .map((i) => ({ id: i._id.toString(), name: i.name, unit: i.unit, currentStock: i.currentStock, lowStockThreshold: i.lowStockThreshold }));
     }
 
@@ -1473,23 +1675,15 @@ router.get('/dashboard/summary', async (req, res, next) => {
     const hourlySales = new Array(24).fill(0);
     for (const o of completedOrders) hourlySales[new Date(o.createdAt).getHours()] += o.total;
 
-    // Sales type distribution
+    // Sales type, payment, and source distribution from last 7 days so charts show data (avoids timezone/today-only empty state)
     const salesTypeDistribution = {};
-    for (const o of completedOrders) {
+    const paymentDistribution = {};
+    const sourceDistribution = {};
+    for (const o of completedLast7) {
       const t = o.orderType || 'DINE_IN';
       salesTypeDistribution[t] = (salesTypeDistribution[t] || 0) + 1;
-    }
-
-    // Payment method distribution
-    const paymentDistribution = {};
-    for (const o of completedOrders) {
       const m = o.paymentMethod || 'CASH';
       paymentDistribution[m] = (paymentDistribution[m] || 0) + 1;
-    }
-
-    // Order source distribution
-    const sourceDistribution = {};
-    for (const o of completedOrders) {
       const s = o.source || 'POS';
       sourceDistribution[s] = (sourceDistribution[s] || 0) + 1;
     }
@@ -1520,7 +1714,7 @@ router.get('/dashboard/summary', async (req, res, next) => {
       category: p.menuItemId ? (menuItemCategoryMap.get(p.menuItemId) || 'Uncategorized') : 'Uncategorized',
       qtySold: p.qty,
       priceSold: Math.round(p.revenue),
-    }));
+      }));
 
     res.json({
       todaysRevenue,
@@ -1911,6 +2105,14 @@ router.put('/kitchen/orders/:id/status', async (req, res, next) => {
     order.status = status;
     await order.save();
 
+    // When order is completed or cancelled, free the table (set isAvailable = true)
+    if ((status === 'COMPLETED' || status === 'CANCELLED') && order.tableName && order.tableName.trim()) {
+      await Table.findOneAndUpdate(
+        { restaurant: order.restaurant, branch: order.branch || null, name: order.tableName.trim() },
+        { $set: { isAvailable: true } }
+      );
+    }
+
     res.json({
       id: order._id.toString(),
       orderNumber: order.orderNumber,
@@ -1921,15 +2123,12 @@ router.put('/kitchen/orders/:id/status', async (req, res, next) => {
   }
 });
 
-// TABLE MANAGEMENT ROUTES
+// TABLE MANAGEMENT ROUTES (simple: name + isAvailable)
 
 const mapTable = (table) => ({
   id: table._id.toString(),
-  tableNumber: table.tableNumber,
-  capacity: table.capacity,
-  location: table.location || '',
-  status: table.status,
-  qrCode: table.qrCode || '',
+  name: table.name || '',
+  isAvailable: table.isAvailable !== false,
   branchId: table.branch ? table.branch.toString() : null,
   createdAt: table.createdAt?.toISOString?.(),
 });
@@ -1945,7 +2144,7 @@ router.get('/tables', async (req, res, next) => {
     const query = { restaurant: restaurantId };
     if (branchId) query.branch = branchId;
 
-    const tables = await Table.find(query).sort({ tableNumber: 1 }).lean();
+    const tables = await Table.find(query).sort({ name: 1 }).lean();
     res.json({ tables: tables.map(mapTable) });
   } catch (error) {
     next(error);
@@ -1959,30 +2158,27 @@ router.post('/tables', async (req, res, next) => {
   try {
     const restaurantId = getRestaurantIdForRequest(req);
     const branchId = getBranchIdForRequest(req);
-    const { tableNumber, capacity, location, status, qrCode } = req.body;
+    const { name } = req.body;
 
-    if (!tableNumber || !tableNumber.trim()) {
-      return res.status(400).json({ message: 'Table number is required' });
+    if (!name || !String(name).trim()) {
+      return res.status(400).json({ message: 'Table name is required' });
     }
 
-    // Check for duplicate table number in same restaurant/branch
+    const trimmedName = String(name).trim();
     const existing = await Table.findOne({
       restaurant: restaurantId,
       branch: branchId || null,
-      tableNumber: tableNumber.trim(),
+      name: trimmedName,
     });
     if (existing) {
-      return res.status(400).json({ message: 'Table number already exists for this branch' });
+      return res.status(400).json({ message: 'A table with this name already exists for this branch' });
     }
 
     const table = await Table.create({
       restaurant: restaurantId,
       branch: branchId || null,
-      tableNumber: tableNumber.trim(),
-      capacity: capacity || 4,
-      location: (location || '').trim(),
-      status: status || 'available',
-      qrCode: (qrCode || '').trim(),
+      name: trimmedName,
+      isAvailable: true,
     });
 
     res.status(201).json(mapTable(table));
@@ -1992,7 +2188,7 @@ router.post('/tables', async (req, res, next) => {
 });
 
 // @route   PUT /api/admin/tables/:id
-// @desc    Update a table
+// @desc    Update a table (name, isAvailable)
 // @access  Restaurant Admin
 router.put('/tables/:id', async (req, res, next) => {
   try {
@@ -2002,26 +2198,26 @@ router.put('/tables/:id', async (req, res, next) => {
       return res.status(404).json({ message: 'Table not found' });
     }
 
-    const { tableNumber, capacity, location, status, qrCode } = req.body;
-    if (tableNumber !== undefined) {
-      const trimmed = tableNumber.trim();
-      if (trimmed && trimmed !== table.tableNumber) {
+    const { name, isAvailable } = req.body;
+    if (name !== undefined) {
+      const trimmed = String(name).trim();
+      if (!trimmed) {
+        return res.status(400).json({ message: 'Table name cannot be empty' });
+      }
+      if (trimmed !== table.name) {
         const duplicate = await Table.findOne({
           restaurant: restaurantId,
           branch: table.branch,
-          tableNumber: trimmed,
+          name: trimmed,
           _id: { $ne: table._id },
         });
         if (duplicate) {
-          return res.status(400).json({ message: 'Table number already exists for this branch' });
+          return res.status(400).json({ message: 'A table with this name already exists for this branch' });
         }
-        table.tableNumber = trimmed;
+        table.name = trimmed;
       }
     }
-    if (capacity !== undefined) table.capacity = capacity;
-    if (location !== undefined) table.location = (location || '').trim();
-    if (status !== undefined) table.status = status;
-    if (qrCode !== undefined) table.qrCode = (qrCode || '').trim();
+    if (typeof isAvailable === 'boolean') table.isAvailable = isAvailable;
 
     await table.save();
     res.json(mapTable(table));

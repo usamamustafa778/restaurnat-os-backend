@@ -5,6 +5,7 @@ const BranchInventory = require('../models/BranchInventory');
 const Customer = require('../models/Customer');
 const Order = require('../models/Order');
 const Branch = require('../models/Branch');
+const Table = require('../models/Table');
 const PosDraft = require('../models/PosDraft');
 const { protect, requireRole, requireRestaurant, checkSubscriptionStatus } = require('../middleware/authMiddleware');
 
@@ -66,7 +67,7 @@ function getMenuItemIngredientCost(menuItem, inventoryMap) {
 // @access  Staff / Restaurant Admin
 router.post('/orders', async (req, res, next) => {
   try {
-    const { items, orderType, paymentMethod, discountAmount = 0, customerName = '', customerPhone = '', deliveryAddress = '', branchId, tableNumber, tableId } = req.body;
+    const { items, orderType, paymentMethod, discountAmount = 0, customerName = '', customerPhone = '', deliveryAddress = '', branchId, tableNumber, tableId, tableName } = req.body;
 
     if (!Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ message: 'Order items are required' });
@@ -87,13 +88,12 @@ router.post('/orders', async (req, res, next) => {
       branch = await Branch.findOne({ _id: branchId, restaurant: restaurantId });
     }
 
-    if (!['DINE_IN', 'TAKEAWAY'].includes(orderType)) {
+    if (!['DINE_IN', 'TAKEAWAY', 'DELIVERY'].includes(orderType)) {
       return res.status(400).json({ message: 'Invalid orderType' });
     }
 
-    if (!['CASH', 'CARD'].includes(paymentMethod)) {
-      return res.status(400).json({ message: 'Invalid paymentMethod' });
-    }
+    // Payment taken at counter (Orders page); POS creates order with PENDING
+    const orderPaymentMethod = (paymentMethod === 'CASH' || paymentMethod === 'CARD') ? paymentMethod : 'PENDING';
 
     const menuItemIds = items.map((i) => i.menuItemId);
     const dbMenuItems = await MenuItem.find({
@@ -251,14 +251,25 @@ router.post('/orders', async (req, res, next) => {
     }
     const profit = Math.round((total - ingredientCost) * 100) / 100;
 
+    const tableNameTrimmed = (tableName || '').trim();
+
+    // When DINE_IN order has a table name, mark that table as occupied (isAvailable = false)
+    if (orderType === 'DINE_IN' && tableNameTrimmed) {
+      await Table.findOneAndUpdate(
+        { restaurant: req.restaurant._id, branch: branch ? branch._id : null, name: tableNameTrimmed },
+        { $set: { isAvailable: false } }
+      );
+    }
+
     const order = await Order.create({
       restaurant: req.restaurant._id,
       branch: branch ? branch._id : undefined,
       table: tableId || undefined,
       tableNumber: (tableNumber || '').trim(),
+      tableName: tableNameTrimmed,
       createdBy: req.user.id,
       orderType,
-      paymentMethod,
+      paymentMethod: orderPaymentMethod,
       status: 'UNPROCESSED',
       items: orderItems,
       subtotal,
@@ -413,6 +424,7 @@ router.get('/drafts', async (req, res, next) => {
       discountAmount: draft.discountAmount,
       itemNotes: draft.itemNotes ? Object.fromEntries(draft.itemNotes) : {},
       tableNumber: draft.tableNumber,
+      tableName: draft.tableName || '',
       selectedWaiter: draft.selectedWaiter,
       branchId: draft.branch ? draft.branch.toString() : null,
       createdAt: draft.createdAt,
@@ -466,9 +478,11 @@ router.post('/drafts', async (req, res, next) => {
     }
 
     // Validate orderType
-    if (!['DINE_IN', 'TAKEAWAY', 'DELIVERY', 'TABLE'].includes(orderType)) {
+    if (!['DINE_IN', 'TAKEAWAY', 'DELIVERY'].includes(orderType)) {
       return res.status(400).json({ message: 'Invalid orderType' });
     }
+
+    const tableNameVal = (req.body.tableName || '').trim();
 
     // Create the draft
     const draft = await PosDraft.create({
@@ -485,6 +499,7 @@ router.post('/drafts', async (req, res, next) => {
       discountAmount,
       itemNotes,
       tableNumber,
+      tableName: tableNameVal,
       selectedWaiter,
     });
 
@@ -504,6 +519,7 @@ router.post('/drafts', async (req, res, next) => {
       discountAmount: draft.discountAmount,
       itemNotes: draft.itemNotes ? Object.fromEntries(draft.itemNotes) : {},
       tableNumber: draft.tableNumber,
+      tableName: draft.tableName || '',
       selectedWaiter: draft.selectedWaiter,
       branchId: draft.branch ? draft.branch.toString() : null,
       createdAt: draft.createdAt,
@@ -549,6 +565,7 @@ router.get('/drafts/:id', async (req, res, next) => {
       discountAmount: draft.discountAmount,
       itemNotes: draft.itemNotes ? Object.fromEntries(draft.itemNotes) : {},
       tableNumber: draft.tableNumber,
+      tableName: draft.tableName || '',
       selectedWaiter: draft.selectedWaiter,
       branchId: draft.branch ? draft.branch.toString() : null,
       createdAt: draft.createdAt,
@@ -578,6 +595,7 @@ router.put('/drafts/:id', async (req, res, next) => {
       discountAmount,
       itemNotes,
       tableNumber,
+      tableName: tableNameBody,
       selectedWaiter,
       branchId,
     } = req.body;
@@ -604,7 +622,7 @@ router.put('/drafts/:id', async (req, res, next) => {
     }
 
     // Validate orderType if provided
-    if (orderType && !['DINE_IN', 'TAKEAWAY', 'DELIVERY', 'TABLE'].includes(orderType)) {
+    if (orderType && !['DINE_IN', 'TAKEAWAY', 'DELIVERY'].includes(orderType)) {
       return res.status(400).json({ message: 'Invalid orderType' });
     }
 
@@ -619,6 +637,7 @@ router.put('/drafts/:id', async (req, res, next) => {
     if (discountAmount !== undefined) draft.discountAmount = discountAmount;
     if (itemNotes !== undefined) draft.itemNotes = itemNotes;
     if (tableNumber !== undefined) draft.tableNumber = tableNumber;
+    if (tableNameBody !== undefined) draft.tableName = String(tableNameBody || '').trim();
     if (selectedWaiter !== undefined) draft.selectedWaiter = selectedWaiter;
 
     await draft.save();
@@ -639,6 +658,7 @@ router.put('/drafts/:id', async (req, res, next) => {
       discountAmount: draft.discountAmount,
       itemNotes: draft.itemNotes ? Object.fromEntries(draft.itemNotes) : {},
       tableNumber: draft.tableNumber,
+      tableName: draft.tableName || '',
       selectedWaiter: draft.selectedWaiter,
       branchId: draft.branch ? draft.branch.toString() : null,
       createdAt: draft.createdAt,
@@ -776,6 +796,7 @@ router.get('/transactions', async (req, res, next) => {
       discountAmount: order.discountAmount,
       appliedDeals: order.appliedDeals || [],
       tableNumber: order.tableNumber,
+      tableName: order.tableName || '',
       branchId: order.branch ? order.branch._id?.toString() : null,
       branchName: order.branch ? order.branch.name : null,
       createdBy: order.createdBy ? {
@@ -815,7 +836,7 @@ router.get('/transactions/:id', async (req, res, next) => {
     })
       .populate('createdBy', 'name email')
       .populate('branch', 'name address')
-      .populate('table', 'tableNumber capacity')
+      .populate('table', 'name isAvailable')
       .lean();
 
     if (!transaction) {
@@ -841,10 +862,11 @@ router.get('/transactions/:id', async (req, res, next) => {
       discountAmount: transaction.discountAmount,
       appliedDeals: transaction.appliedDeals || [],
       tableNumber: transaction.tableNumber,
+      tableName: transaction.tableName || '',
       table: transaction.table ? {
         id: transaction.table._id?.toString(),
-        tableNumber: transaction.table.tableNumber,
-        capacity: transaction.table.capacity,
+        name: transaction.table.name,
+        isAvailable: transaction.table.isAvailable,
       } : null,
       branchId: transaction.branch ? transaction.branch._id?.toString() : null,
       branch: transaction.branch ? {

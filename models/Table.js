@@ -14,29 +14,14 @@ const tableSchema = new mongoose.Schema(
       default: null,
       index: true,
     },
-    tableNumber: {
+    name: {
       type: String,
       required: true,
       trim: true,
     },
-    capacity: {
-      type: Number,
-      default: 4,
-      min: 1,
-    },
-    location: {
-      type: String,
-      default: '',
-      trim: true,
-    },
-    status: {
-      type: String,
-      enum: ['available', 'occupied', 'reserved', 'maintenance'],
-      default: 'available',
-    },
-    qrCode: {
-      type: String,
-      default: '',
+    isAvailable: {
+      type: Boolean,
+      default: true,
     },
   },
   {
@@ -44,7 +29,7 @@ const tableSchema = new mongoose.Schema(
   }
 );
 
-tableSchema.index({ restaurant: 1, branch: 1, tableNumber: 1 }, { unique: true });
+tableSchema.index({ restaurant: 1, branch: 1, name: 1 }, { unique: true });
 
 const Table = mongoose.model('Table', tableSchema);
 
