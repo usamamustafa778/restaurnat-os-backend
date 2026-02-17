@@ -272,6 +272,7 @@ const mapMenuItem = (item, options) => {
   description: item.description || '',
   isFeatured: item.isFeatured || false,
   isBestSeller: item.isBestSeller || false,
+  dietaryType: item.dietaryType || 'non_veg',
     inventoryConsumptions: (item.inventoryConsumptions || []).map((c) => {
       const invId = c.inventoryItem?.toString?.();
       return {
@@ -889,7 +890,7 @@ const normalizeInventoryConsumptions = async (restaurantId, rawConsumptions) => 
 // @access  Restaurant Admin / Super Admin
 router.post('/items', async (req, res, next) => {
   try {
-    const { name, description, price, categoryId, showOnWebsite, imageUrl, inventoryConsumptions } = req.body;
+    const { name, description, price, categoryId, showOnWebsite, imageUrl, dietaryType, inventoryConsumptions } = req.body;
     const restaurantId = getRestaurantIdForRequest(req);
 
     if (!name || !name.trim() || price === undefined || !categoryId) {
@@ -918,6 +919,7 @@ router.post('/items', async (req, res, next) => {
       category: categoryId,
       showOnWebsite: showOnWebsite !== undefined ? !!showOnWebsite : true,
       imageUrl,
+      dietaryType: ['veg', 'non_veg', 'egg'].includes(dietaryType) ? dietaryType : 'non_veg',
       inventoryConsumptions: normalizedConsumptions,
     });
 
@@ -933,7 +935,7 @@ router.post('/items', async (req, res, next) => {
 router.put('/items/:id', async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { name, description, price, categoryId, available, showOnWebsite, imageUrl, isFeatured, isBestSeller, inventoryConsumptions } = req.body;
+    const { name, description, price, categoryId, available, showOnWebsite, imageUrl, isFeatured, isBestSeller, dietaryType, inventoryConsumptions } = req.body;
     const restaurantId = getRestaurantIdForRequest(req);
 
     const item = await MenuItem.findOne({ _id: id, restaurant: restaurantId });
@@ -949,6 +951,7 @@ router.put('/items/:id', async (req, res, next) => {
     if (imageUrl !== undefined) item.imageUrl = imageUrl;
     if (typeof isFeatured === 'boolean') item.isFeatured = isFeatured;
     if (typeof isBestSeller === 'boolean') item.isBestSeller = isBestSeller;
+    if (dietaryType !== undefined && ['veg', 'non_veg', 'egg'].includes(dietaryType)) item.dietaryType = dietaryType;
 
     if (categoryId) {
       const category = await Category.findOne({ _id: categoryId, restaurant: restaurantId });
@@ -1612,6 +1615,10 @@ router.get('/dashboard/summary', async (req, res, next) => {
     const endOfDay = new Date();
     endOfDay.setHours(23, 59, 59, 999);
 
+    // For monthly product performance we look at the current month up to today
+    const startOfMonth = new Date(startOfDay);
+    startOfMonth.setDate(1);
+
     const orderFilter = { restaurant: restaurantId, createdAt: { $gte: startOfDay, $lte: endOfDay } };
     if (branchId) orderFilter.branch = branchId;
 
@@ -1624,10 +1631,27 @@ router.get('/dashboard/summary', async (req, res, next) => {
     const orderFilterLast7 = { restaurant: restaurantId, status: 'COMPLETED', createdAt: { $gte: sevenDaysAgo, $lte: endOfDay } };
     if (branchId) orderFilterLast7.branch = branchId;
 
-    const [allTodayOrders, pendingOrdersList, completedLast7, inventoryItems, allMenuItems, categories] = await Promise.all([
+    // Orders for the current month (completed only) for products performance
+    const monthlyCompletedFilter = {
+      restaurant: restaurantId,
+      status: 'COMPLETED',
+      createdAt: { $gte: startOfMonth, $lte: endOfDay },
+    };
+    if (branchId) monthlyCompletedFilter.branch = branchId;
+
+    const [
+      allTodayOrders,
+      pendingOrdersList,
+      completedLast7,
+      completedThisMonth,
+      inventoryItems,
+      allMenuItems,
+      categories,
+    ] = await Promise.all([
       Order.find(orderFilter),
       Order.find(pendingFilter),
       Order.find(orderFilterLast7),
+      Order.find(monthlyCompletedFilter),
       InventoryItem.find({ restaurant: restaurantId }),
       MenuItem.find({ restaurant: restaurantId }),
       Category.find({ restaurant: restaurantId }),
@@ -1688,7 +1712,7 @@ router.get('/dashboard/summary', async (req, res, next) => {
       sourceDistribution[s] = (sourceDistribution[s] || 0) + 1;
     }
 
-    // Top products
+    // Top products - for charts we still use today's completed orders
     const productMap = new Map();
     for (const o of completedOrders) {
       for (const item of o.items) {
@@ -1709,11 +1733,31 @@ router.get('/dashboard/summary', async (req, res, next) => {
       menuItemCategoryMap.set(mi._id.toString(), categoryMap.get(mi.category ? mi.category.toString() : '') || 'Uncategorized');
     }
 
-    const productsPerformance = topProducts.map(p => ({
-      name: p.name,
-      category: p.menuItemId ? (menuItemCategoryMap.get(p.menuItemId) || 'Uncategorized') : 'Uncategorized',
-      qtySold: p.qty,
-      priceSold: Math.round(p.revenue),
+    // Products performance: this month (completed orders only) so the table is richer
+    const monthlyProductMap = new Map();
+    for (const o of completedThisMonth) {
+      for (const item of o.items) {
+        const key = item.menuItem ? item.menuItem.toString() : item.name;
+        const existing = monthlyProductMap.get(key) || {
+          name: item.name,
+          menuItemId: item.menuItem ? item.menuItem.toString() : null,
+          qty: 0,
+          revenue: 0,
+        };
+        existing.qty += item.quantity;
+        existing.revenue += item.lineTotal;
+        monthlyProductMap.set(key, existing);
+      }
+    }
+
+    const productsPerformance = Array.from(monthlyProductMap.values())
+      .sort((a, b) => b.qty - a.qty)
+      .slice(0, 50)
+      .map((p) => ({
+        name: p.name,
+        category: p.menuItemId ? menuItemCategoryMap.get(p.menuItemId) || 'Uncategorized' : 'Uncategorized',
+        qtySold: p.qty,
+        priceSold: Math.round(p.revenue),
       }));
 
     res.json({

@@ -67,6 +67,11 @@ const menuItemSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    dietaryType: {
+      type: String,
+      enum: ['veg', 'non_veg', 'egg'],
+      default: 'non_veg',
+    },
     inventoryConsumptions: [inventoryConsumptionSchema],
   },
   {

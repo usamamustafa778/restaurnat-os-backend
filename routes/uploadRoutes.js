@@ -5,12 +5,22 @@ const { protect, requireRole, requireRestaurant } = require('../middleware/authM
 
 const router = express.Router();
 
-// Configure Cloudinary from env
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET,
-});
+// Check Cloudinary is configured (required for image uploads)
+function getCloudinaryConfig() {
+  const cloud_name = process.env.CLOUDINARY_CLOUD_NAME;
+  const api_key = process.env.CLOUDINARY_API_KEY;
+  const api_secret = process.env.CLOUDINARY_API_SECRET;
+  if (!cloud_name || !api_key || !api_secret) {
+    return null;
+  }
+  return { cloud_name, api_key, api_secret };
+}
+
+// Configure Cloudinary from env (only if all vars present)
+const cloudinaryEnv = getCloudinaryConfig();
+if (cloudinaryEnv) {
+  cloudinary.config(cloudinaryEnv);
+}
 
 // Use memory storage so we can stream the buffer to Cloudinary
 const upload = multer({
@@ -33,6 +43,11 @@ router.use(protect, requireRole('staff', 'restaurant_admin', 'admin', 'product_m
 // @access  Authenticated restaurant users
 router.post('/image', upload.single('image'), async (req, res, next) => {
   try {
+    if (!getCloudinaryConfig()) {
+      return res.status(503).json({
+        message: 'Image upload is not configured. Set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET in the server environment.',
+      });
+    }
     if (!req.file) {
       return res.status(400).json({ message: 'No image file provided' });
     }
