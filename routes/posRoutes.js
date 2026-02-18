@@ -11,7 +11,7 @@ const { protect, requireRole, requireRestaurant, checkSubscriptionStatus } = req
 
 const router = express.Router();
 
-router.use(protect, requireRole('staff', 'restaurant_admin', 'admin', 'cashier', 'manager', 'product_manager', 'kitchen_staff'), requireRestaurant, checkSubscriptionStatus);
+router.use(protect, requireRole('staff', 'restaurant_admin', 'admin', 'cashier', 'manager', 'product_manager', 'kitchen_staff', 'order_taker'), requireRestaurant, checkSubscriptionStatus);
 
 /**
  * Generate a sequential order number: ORD-YYYYMMDD-0001, 0002, etc.

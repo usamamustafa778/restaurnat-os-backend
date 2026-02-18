@@ -26,7 +26,8 @@ router.use(
     'product_manager',
     'cashier',
     'manager',
-    'kitchen_staff'
+    'kitchen_staff',
+    'order_taker'
   )
 );
 
@@ -545,9 +546,12 @@ router.get('/orders/:id', async (req, res, next) => {
 
 // @route   PUT /api/admin/orders/:id
 // @desc    Update order (items, discount, customer, orderType, tableName) – for edit from POS
-// @access  Restaurant Admin / Staff / Super Admin
+// @access  Restaurant Admin / Admin / Manager / Cashier (order_taker view-only on orders)
 router.put('/orders/:id', async (req, res, next) => {
   try {
+    if (req.user.role === 'order_taker') {
+      return res.status(403).json({ message: 'Order takers can only view orders' });
+    }
     const { id } = req.params;
     const { items, discountAmount, customerName, customerPhone, deliveryAddress, orderType, tableName } = req.body;
     const restaurantId = getRestaurantIdForRequest(req);
@@ -616,9 +620,12 @@ router.put('/orders/:id', async (req, res, next) => {
 
 // @route   PUT /api/admin/orders/:id/status
 // @desc    Update order status (find by restaurant; branch optional for legacy orders)
-// @access  Restaurant Admin / Staff / Super Admin
+// @access  Restaurant Admin / Admin / Manager / Cashier (order_taker view-only)
 router.put('/orders/:id/status', async (req, res, next) => {
   try {
+    if (req.user.role === 'order_taker') {
+      return res.status(403).json({ message: 'Order takers can only view orders' });
+    }
     const { id } = req.params;
     const { status } = req.body;
     const restaurantId = getRestaurantIdForRequest(req);
@@ -658,9 +665,12 @@ router.put('/orders/:id/status', async (req, res, next) => {
 
 // @route   PUT /api/admin/orders/:id/payment
 // @desc    Record payment (cashier): set paymentMethod, for CASH record amountReceived and change returned; set status to COMPLETED
-// @access  Restaurant Admin / Staff / Super Admin
+// @access  Restaurant Admin / Admin / Manager / Cashier (order_taker cannot record payment)
 router.put('/orders/:id/payment', async (req, res, next) => {
   try {
+    if (req.user.role === 'order_taker') {
+      return res.status(403).json({ message: 'Order takers cannot record payment' });
+    }
     const { id } = req.params;
     const { paymentMethod, amountReceived, amountReturned } = req.body;
     const restaurantId = getRestaurantIdForRequest(req);
@@ -725,9 +735,12 @@ router.put('/orders/:id/payment', async (req, res, next) => {
 
 // @route   DELETE /api/admin/orders/:id
 // @desc    Delete an order (find by _id or orderNumber; restaurant-scoped)
-// @access  Restaurant Admin / Super Admin
+// @access  Restaurant Admin / Admin / Manager / Cashier (order_taker cannot delete)
 router.delete('/orders/:id', async (req, res, next) => {
   try {
+    if (req.user.role === 'order_taker') {
+      return res.status(403).json({ message: 'Order takers can only view orders' });
+    }
     const { id } = req.params;
     const restaurantId = getRestaurantIdForRequest(req);
 
@@ -1816,16 +1829,17 @@ router.post('/users', async (req, res, next) => {
       return res.status(400).json({ message: 'Name, email and password are required' });
     }
 
-    // Allow descriptive UI roles; they are display-only and do not affect auth
-    const allowedRoles = [
-      'admin',
-      'product_manager',
-      'cashier',
-      'manager',
-      'kitchen_staff'
-    ];
+    // Manager can only add non-admin, non-manager roles. Admin/restaurant_admin can add any role.
+    const isManagerRequester = req.user.role === 'manager';
+    const allowedRoles = isManagerRequester
+      ? ['product_manager', 'cashier', 'kitchen_staff', 'order_taker']
+      : ['admin', 'product_manager', 'cashier', 'manager', 'kitchen_staff', 'order_taker'];
     if (role && !allowedRoles.includes(role)) {
-      return res.status(400).json({ message: 'Invalid role' });
+      return res.status(400).json({
+        message: isManagerRequester
+          ? 'Managers can only add Product Manager, Cashier, Kitchen Staff, or Order Taker'
+          : 'Invalid role',
+      });
     }
 
     const existing = await User.findOne({ email: email.toLowerCase().trim() });
@@ -1880,15 +1894,16 @@ router.put('/users/:id', async (req, res, next) => {
     if (name !== undefined) user.name = name.trim();
     if (email !== undefined) user.email = email.toLowerCase().trim();
     if (role !== undefined) {
-      const allowedRoles = [
-        'admin',
-        'product_manager',
-        'cashier',
-        'manager',
-        'kitchen_staff'
-      ];
+      const isManagerRequester = req.user.role === 'manager';
+      const allowedRoles = isManagerRequester
+        ? ['product_manager', 'cashier', 'kitchen_staff', 'order_taker']
+        : ['admin', 'product_manager', 'cashier', 'manager', 'kitchen_staff', 'order_taker'];
       if (!allowedRoles.includes(role)) {
-        return res.status(400).json({ message: 'Invalid role' });
+        return res.status(400).json({
+          message: isManagerRequester
+            ? 'Managers cannot assign Admin or Manager role'
+            : 'Invalid role',
+        });
       }
       user.role = role;
     }
@@ -1927,8 +1942,8 @@ router.put('/users/:id', async (req, res, next) => {
 });
 
 // @route   DELETE /api/admin/users/:id
-// @desc    Delete a user for this restaurant (and branch assignments)
-// @access  Restaurant Admin / Super Admin
+// @desc    Delete a user for this restaurant (and branch assignments). Manager cannot delete self; only admin can delete manager.
+// @access  Restaurant Admin / Admin (Manager cannot delete self or other managers)
 router.delete('/users/:id', async (req, res, next) => {
   try {
     const { id } = req.params;
@@ -1937,6 +1952,15 @@ router.delete('/users/:id', async (req, res, next) => {
     const user = await User.findOne({ _id: id, restaurant: restaurantId });
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
+    }
+
+    const requesterId = req.user._id?.toString?.() ?? req.user.id;
+    const targetId = user._id.toString();
+    if (requesterId === targetId) {
+      return res.status(403).json({ message: 'You cannot delete yourself' });
+    }
+    if (user.role === 'manager' && req.user.role !== 'restaurant_admin' && req.user.role !== 'admin') {
+      return res.status(403).json({ message: 'Only an admin can delete a manager' });
     }
 
     await Promise.all([
