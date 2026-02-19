@@ -14,6 +14,10 @@ const InventoryItem = require('../models/InventoryItem');
 async function getBranchMenu(restaurantId, branchId = null, filters = {}) {
   // Build base query for menu items
   const menuQuery = { restaurant: restaurantId };
+  // When a branch is selected, only load items scoped to that branch
+  if (branchId) {
+    menuQuery.branch = branchId;
+  }
   
   if (filters.available !== undefined) {
     menuQuery.available = filters.available;
@@ -130,6 +134,10 @@ async function getBranchMenu(restaurantId, branchId = null, filters = {}) {
 async function getBranchMenuByCategory(restaurantId, branchId = null, filters = {}) {
   // Get categories
   const categoryQuery = { restaurant: restaurantId };
+  // When a branch is selected, only load categories scoped to that branch
+  if (branchId) {
+    categoryQuery.branch = branchId;
+  }
   if (filters.activeOnly) {
     categoryQuery.isActive = true;
   }
@@ -180,6 +188,11 @@ async function getBranchMenuItem(menuItemId, branchId = null) {
     .lean();
 
   if (!baseItem) {
+    return null;
+  }
+
+  // If an item is scoped to a specific branch, prevent accessing it from another branch
+  if (branchId && baseItem.branch && baseItem.branch.toString() !== String(branchId)) {
     return null;
   }
 

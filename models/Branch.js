@@ -43,6 +43,16 @@ const branchSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+    // Soft delete flags for safe recovery
+    isDeleted: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+    deletedAt: {
+      type: Date,
+      default: null,
+    },
   },
   {
     timestamps: true,

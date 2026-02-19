@@ -159,7 +159,7 @@ const checkSubscriptionStatus = async (req, res, next) => {
  */
 const getBranchContext = async (user, restaurantId) => {
   if (!restaurantId) return { allowedBranchIds: [], defaultBranchId: null };
-  const isOwner = user.role === 'restaurant_admin' || user.role === 'super_admin';
+  const isOwner = user.role === 'restaurant_admin' || user.role === 'super_admin' || user.role === 'admin';
   if (isOwner) {
     const branches = await Branch.find({ restaurant: restaurantId }).sort({ sortOrder: 1, createdAt: 1 }).select('_id').lean();
     const allowedBranchIds = branches.map((b) => b._id.toString());
@@ -187,7 +187,9 @@ const resolveBranch = async (req, res, next) => {
     if (!req.restaurant) {
       return next();
     }
-    if (req.user.role === 'super_admin') {
+    // Admins and owners can access any branch — resolve directly without allowedBranchIds check
+    const isFullAccess = ['super_admin', 'restaurant_admin', 'admin'].includes(req.user.role);
+    if (isFullAccess) {
       const branchId = req.headers['x-branch-id'];
       if (branchId) {
         const branch = await Branch.findOne({ _id: branchId, restaurant: req.restaurant._id });

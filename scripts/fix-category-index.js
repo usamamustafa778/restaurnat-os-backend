@@ -33,16 +33,26 @@ async function fixCategoryIndex() {
       console.log(`\n✓ Old index ${oldIndexName} not found (already clean)`);
     }
 
-    // Ensure the correct compound index exists
-    const compoundIndexName = 'restaurant_1_name_1';
-    const hasCompoundIndex = indexes.some(idx => idx.name === compoundIndexName);
-    
+    let currentIndexes = await categoriesCollection.indexes();
+
+    // Drop old compound index without branch if present (wrong scope)
+    const oldCompoundName = 'restaurant_1_name_1';
+    if (currentIndexes.some(idx => idx.name === oldCompoundName)) {
+      console.log(`\nDropping old compound index: ${oldCompoundName}...`);
+      await categoriesCollection.dropIndex(oldCompoundName);
+      console.log('✓ Dropped');
+      currentIndexes = await categoriesCollection.indexes();
+    }
+
+    // Ensure the correct compound index (restaurant + branch + name) exists — unique per branch
+    const compoundKey = { restaurant: 1, branch: 1, name: 1 };
+    const compoundIndexName = 'restaurant_1_branch_1_name_1';
+    const hasCompoundIndex = currentIndexes.some(
+      idx => idx.name === compoundIndexName || (idx.unique && JSON.stringify(idx.key) === JSON.stringify(compoundKey))
+    );
     if (!hasCompoundIndex) {
-      console.log('\nCreating compound index: restaurant_1_name_1...');
-      await categoriesCollection.createIndex(
-        { restaurant: 1, name: 1 },
-        { unique: true, name: 'restaurant_1_name_1' }
-      );
+      console.log('\nCreating compound index: restaurant_1_branch_1_name_1 (unique per branch)...');
+      await categoriesCollection.createIndex(compoundKey, { unique: true, name: compoundIndexName });
       console.log('✓ Compound index created');
     } else {
       console.log('\n✓ Compound index already exists');

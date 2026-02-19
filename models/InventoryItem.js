@@ -8,6 +8,13 @@ const inventoryItemSchema = new mongoose.Schema(
       required: true,
       index: true,
     },
+    // Optional branch scoping: when set, this inventory item definition belongs to a single branch
+    branch: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Branch',
+      default: null,
+      index: true,
+    },
     name: {
       type: String,
       required: true,
@@ -43,6 +50,8 @@ const inventoryItemSchema = new mongoose.Schema(
     timestamps: true,
   }
 );
+
+inventoryItemSchema.index({ restaurant: 1, branch: 1, name: 1 }, { unique: true });
 
 const InventoryItem = mongoose.model('InventoryItem', inventoryItemSchema);
 

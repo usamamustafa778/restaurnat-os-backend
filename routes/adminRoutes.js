@@ -113,16 +113,40 @@ const generateUniqueBranchCode = async (restaurantId, baseName) => {
 
 // ————— Branch CRUD —————
 // @route   GET /api/admin/branches
-// @desc    List branches for the tenant (filtered by allowedBranchIds for non-owners)
+// @desc    List branches for the tenant (filtered by allowedBranchIds for non-owners; admin/restaurant_admin see all)
 // @access  Restaurant Admin / Staff / Super Admin
 router.get('/branches', async (req, res, next) => {
   try {
     const restaurantId = getRestaurantIdForRequest(req);
-    let query = { restaurant: restaurantId };
-    if (req.user.role !== 'super_admin' && req.user.role !== 'restaurant_admin' && req.user.allowedBranchIds?.length) {
+    let query = { restaurant: restaurantId, isDeleted: { $ne: true } };
+    const canSeeAllBranches = req.user.role === 'super_admin' || req.user.role === 'restaurant_admin' || req.user.role === 'admin';
+    if (!canSeeAllBranches && req.user.allowedBranchIds?.length) {
       query._id = { $in: req.user.allowedBranchIds };
     }
     const branches = await Branch.find(query).sort({ sortOrder: 1, createdAt: 1 }).lean();
+    res.json({ branches: branches.map((b) => mapBranch(b)) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @route   GET /api/admin/branches/deleted
+// @desc    List soft-deleted branches from the last 48 hours (owner only)
+// @access  Restaurant Admin / Super Admin
+router.get('/branches/deleted', async (req, res, next) => {
+  try {
+    const restaurantId = getRestaurantIdForRequest(req);
+    if (req.user.role !== 'super_admin' && req.user.role !== 'restaurant_admin') {
+      return res.status(403).json({ message: 'Only restaurant owner can view deleted branches' });
+    }
+    const cutoff = new Date(Date.now() - 48 * 60 * 60 * 1000);
+    const branches = await Branch.find({
+      restaurant: restaurantId,
+      isDeleted: true,
+      deletedAt: { $gte: cutoff },
+    })
+      .sort({ deletedAt: -1 })
+      .lean();
     res.json({ branches: branches.map((b) => mapBranch(b)) });
   } catch (error) {
     next(error);
@@ -176,7 +200,7 @@ router.post('/branches', async (req, res, next) => {
 router.get('/branches/:id', async (req, res, next) => {
   try {
     const restaurantId = getRestaurantIdForRequest(req);
-    const branch = await Branch.findOne({ _id: req.params.id, restaurant: restaurantId });
+    const branch = await Branch.findOne({ _id: req.params.id, restaurant: restaurantId, isDeleted: { $ne: true } });
     if (!branch) {
       return res.status(404).json({ message: 'Branch not found' });
     }
@@ -195,7 +219,7 @@ router.get('/branches/:id', async (req, res, next) => {
 router.put('/branches/:id', async (req, res, next) => {
   try {
     const restaurantId = getRestaurantIdForRequest(req);
-    const branch = await Branch.findOne({ _id: req.params.id, restaurant: restaurantId });
+    const branch = await Branch.findOne({ _id: req.params.id, restaurant: restaurantId, isDeleted: { $ne: true } });
     if (!branch) {
       return res.status(404).json({ message: 'Branch not found' });
     }
@@ -232,7 +256,7 @@ router.put('/branches/:id', async (req, res, next) => {
 });
 
 // @route   DELETE /api/admin/branches/:id
-// @desc    Soft-delete / deactivate branch (prefer not hard-delete so orders remain valid)
+// @desc    Soft-delete branch (mark as deleted, recoverable within 48 hours)
 // @access  Restaurant Admin / Super Admin
 router.delete('/branches/:id', async (req, res, next) => {
   try {
@@ -244,9 +268,46 @@ router.delete('/branches/:id', async (req, res, next) => {
     if (!branch) {
       return res.status(404).json({ message: 'Branch not found' });
     }
+    if (branch.isDeleted) {
+      return res.status(400).json({ message: 'Branch is already deleted' });
+    }
     branch.status = 'inactive';
+    branch.isDeleted = true;
+    branch.deletedAt = new Date();
     await branch.save();
     res.status(204).send();
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @route   POST /api/admin/branches/:id/restore
+// @desc    Restore a soft-deleted branch within 48 hours
+// @access  Restaurant Admin / Super Admin
+router.post('/branches/:id/restore', async (req, res, next) => {
+  try {
+    const restaurantId = getRestaurantIdForRequest(req);
+    if (req.user.role !== 'super_admin' && req.user.role !== 'restaurant_admin') {
+      return res.status(403).json({ message: 'Only restaurant owner can restore branches' });
+    }
+    const branch = await Branch.findOne({ _id: req.params.id, restaurant: restaurantId });
+    if (!branch) {
+      return res.status(404).json({ message: 'Branch not found' });
+    }
+    if (!branch.isDeleted || !branch.deletedAt) {
+      return res.status(400).json({ message: 'Branch is not deleted' });
+    }
+    const now = Date.now();
+    const deletedAtMs = branch.deletedAt.getTime();
+    const diffHours = (now - deletedAtMs) / (1000 * 60 * 60);
+    if (diffHours > 48) {
+      return res.status(400).json({ message: 'Restore window (48 hours) has expired for this branch' });
+    }
+    branch.isDeleted = false;
+    branch.deletedAt = null;
+    branch.status = 'active';
+    await branch.save();
+    res.json(mapBranch(branch));
   } catch (error) {
     next(error);
   }
@@ -400,12 +461,33 @@ function checkInventorySufficiency(menuItem, inventoryMap) {
 router.get('/menu', async (req, res, next) => {
   try {
     const restaurantId = getRestaurantIdForRequest(req);
-    const branchId = getBranchIdForRequest(req);
+    // Prefer explicit ?branchId query param (frontend passes currentBranch.id directly)
+    // so the displayed list always matches what duplicate checks query.
+    let branchId = getBranchIdForRequest(req);
+    if (req.query.branchId && req.query.branchId !== 'all') {
+      const branchDoc = await Branch.findOne({ _id: req.query.branchId, restaurant: restaurantId });
+      if (branchDoc) branchId = branchDoc._id;
+    }
+
+    // When a branch is selected, show only data scoped to that branch.
+    // Legacy items/categories/inventory without branch set will appear only when no branch is selected.
+    const categoryQuery = { restaurant: restaurantId };
+    const itemQuery = { restaurant: restaurantId };
+    const inventoryQuery = { restaurant: restaurantId };
+    if (branchId) {
+      categoryQuery.branch = branchId;
+      itemQuery.branch = branchId;
+      inventoryQuery.branch = branchId;
+    } else {
+      categoryQuery.branch = null;
+      itemQuery.branch = null;
+      inventoryQuery.branch = null;
+    }
 
     const [categories, items, inventoryItems] = await Promise.all([
-      Category.find({ restaurant: restaurantId }).sort({ createdAt: 1 }),
-      MenuItem.find({ restaurant: restaurantId }),
-      InventoryItem.find({ restaurant: restaurantId }),
+      Category.find(categoryQuery).sort({ createdAt: 1 }),
+      MenuItem.find(itemQuery),
+      InventoryItem.find(inventoryQuery),
     ]);
 
     const invUnitMap = new Map(inventoryItems.map((inv) => [inv._id.toString(), inv.unit || 'gram']));
@@ -765,30 +847,48 @@ router.delete('/orders/:id', async (req, res, next) => {
 // CATEGORY ROUTES
 
 // @route   POST /api/admin/categories
-// @desc    Create a new category
+// @desc    Create a new category (branch from x-branch-id header or body.branchId)
 // @access  Restaurant Admin / Super Admin
 router.post('/categories', async (req, res, next) => {
   try {
-    const { name, description } = req.body;
+    const { name, description, branchId: bodyBranchId } = req.body;
     const restaurantId = getRestaurantIdForRequest(req);
+    const headerBranchId = getBranchIdForRequest(req);
+    let branchId = headerBranchId;
+    if (bodyBranchId && bodyBranchId !== 'all') {
+      const branchDoc = await Branch.findOne({ _id: bodyBranchId, restaurant: restaurantId });
+      if (branchDoc) branchId = branchDoc._id;
+    }
 
     if (!name || !name.trim()) {
       return res.status(400).json({ message: 'Category name is required' });
     }
+    if (!branchId) {
+      return res.status(400).json({ message: 'Please select a specific branch before creating a category.' });
+    }
 
-    const existing = await Category.findOne({ restaurant: restaurantId, name: name.trim() });
+    const escapedName = name.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const existing = await Category.findOne({
+      restaurant: restaurantId,
+      branch: branchId,
+      name: { $regex: new RegExp(`^${escapedName}$`, 'i') },
+    });
     if (existing) {
-      return res.status(400).json({ message: 'Category with this name already exists for this restaurant' });
+      return res.status(400).json({ message: 'A category with this name already exists in this branch.' });
     }
 
     const category = await Category.create({
       restaurant: restaurantId,
+      branch: branchId,
       name: name.trim(),
       description: description || '',
     });
 
     res.status(201).json(mapCategory(category));
   } catch (error) {
+    if (error.code === 11000) {
+      return res.status(400).json({ message: 'A category with this name already exists in this branch.' });
+    }
     next(error);
   }
 });
@@ -801,6 +901,7 @@ router.put('/categories/:id', async (req, res, next) => {
     const { id } = req.params;
     const { name, description, isActive } = req.body;
     const restaurantId = getRestaurantIdForRequest(req);
+    const branchId = getBranchIdForRequest(req);
 
     const category = await Category.findOne({ _id: id, restaurant: restaurantId });
     if (!category) {
@@ -813,11 +914,12 @@ router.put('/categories/:id', async (req, res, next) => {
       if (trimmedName !== category.name) {
         const duplicate = await Category.findOne({
           restaurant: restaurantId,
+          branch: branchId || category.branch || null,
           name: trimmedName,
           _id: { $ne: category._id },
         });
         if (duplicate) {
-          return res.status(400).json({ message: 'A category with this name already exists' });
+          return res.status(400).json({ message: 'A category with this name already exists in this branch.' });
         }
         category.name = trimmedName;
       }
@@ -830,6 +932,9 @@ router.put('/categories/:id', async (req, res, next) => {
 
     res.json(mapCategory(category));
   } catch (error) {
+    if (error.code === 11000) {
+      return res.status(400).json({ message: 'A category with this name already exists in this branch.' });
+    }
     next(error);
   }
 });
@@ -903,16 +1008,37 @@ const normalizeInventoryConsumptions = async (restaurantId, rawConsumptions) => 
 // @access  Restaurant Admin / Super Admin
 router.post('/items', async (req, res, next) => {
   try {
-    const { name, description, price, categoryId, showOnWebsite, imageUrl, dietaryType, inventoryConsumptions } = req.body;
+    const { name, description, price, categoryId, showOnWebsite, imageUrl, dietaryType, inventoryConsumptions, branchId: bodyBranchId } = req.body;
     const restaurantId = getRestaurantIdForRequest(req);
+    const headerBranchId = getBranchIdForRequest(req);
+    let branchId = headerBranchId;
+    if (bodyBranchId && bodyBranchId !== 'all') {
+      const branchDoc = await Branch.findOne({ _id: bodyBranchId, restaurant: restaurantId });
+      if (branchDoc) branchId = branchDoc._id;
+    }
 
     if (!name || !name.trim() || price === undefined || !categoryId) {
       return res.status(400).json({ message: 'Name, price and categoryId are required' });
     }
+    if (!branchId) {
+      return res.status(400).json({ message: 'Please select a specific branch before adding a menu item.' });
+    }
 
-    const category = await Category.findOne({ _id: categoryId, restaurant: restaurantId });
+    const categoryQuery = { _id: categoryId, restaurant: restaurantId };
+    if (branchId) categoryQuery.branch = branchId;
+    const category = await Category.findOne(categoryQuery);
     if (!category) {
       return res.status(400).json({ message: 'Invalid categoryId' });
+    }
+
+    const escapedItemName = name.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const existingItem = await MenuItem.findOne({
+      restaurant: restaurantId,
+      branch: branchId,
+      name: { $regex: new RegExp(`^${escapedItemName}$`, 'i') },
+    });
+    if (existingItem) {
+      return res.status(400).json({ message: 'A menu item with this name already exists in this branch.' });
     }
 
     let normalizedConsumptions = [];
@@ -926,6 +1052,7 @@ router.post('/items', async (req, res, next) => {
 
     const item = await MenuItem.create({
       restaurant: restaurantId,
+      branch: branchId,
       name: name.trim(),
       description: description || '',
       price,
@@ -938,6 +1065,9 @@ router.post('/items', async (req, res, next) => {
 
     res.status(201).json(mapMenuItem(item));
   } catch (error) {
+    if (error.code === 11000) {
+      return res.status(400).json({ message: 'A menu item with this name already exists in this branch.' });
+    }
     next(error);
   }
 });
@@ -956,7 +1086,20 @@ router.put('/items/:id', async (req, res, next) => {
       return res.status(404).json({ message: 'Menu item not found' });
     }
 
-    if (name !== undefined) item.name = name.trim();
+    if (name !== undefined && name.trim() !== item.name) {
+      const duplicate = await MenuItem.findOne({
+        restaurant: restaurantId,
+        branch: item.branch || null,
+        name: name.trim(),
+        _id: { $ne: id },
+      });
+      if (duplicate) {
+        return res.status(400).json({ message: 'A menu item with this name already exists in this branch.' });
+      }
+      item.name = name.trim();
+    } else if (name !== undefined) {
+      item.name = name.trim();
+    }
     if (description !== undefined) item.description = description;
     if (price !== undefined) item.price = price;
     if (typeof available === 'boolean') item.available = available;
@@ -986,6 +1129,9 @@ router.put('/items/:id', async (req, res, next) => {
 
     res.json(mapMenuItem(item));
   } catch (error) {
+    if (error.code === 11000) {
+      return res.status(400).json({ message: 'A menu item with this name already exists in this branch.' });
+    }
     next(error);
   }
 });
@@ -1093,6 +1239,197 @@ router.get('/branch-menu', async (req, res, next) => {
   }
 });
 
+// BRANCH COPY (bulk copy categories/items from another branch)
+// Admin can copy from any branch; manager only from assigned branches.
+
+function canAccessBranchAsSource(req, branchId) {
+  if (!branchId) return false;
+  const role = req.user.role;
+  if (role === 'super_admin' || role === 'restaurant_admin' || role === 'admin') return true;
+  const allowed = req.user.allowedBranchIds || [];
+  return allowed.some((id) => String(id) === String(branchId));
+}
+
+// @route   GET /api/admin/branch-copy/menu
+// @desc    List categories and items from a source branch (for copy UI). Admin: any branch; manager: assigned only.
+// @access  Restaurant Admin / Admin / Manager
+router.get('/branch-copy/menu', async (req, res, next) => {
+  try {
+    const sourceBranchId = req.query.sourceBranchId;
+    if (!sourceBranchId) {
+      return res.status(400).json({ message: 'sourceBranchId is required' });
+    }
+    const restaurantId = getRestaurantIdForRequest(req);
+    const branchDoc = await Branch.findOne({ _id: sourceBranchId, restaurant: restaurantId });
+    if (!branchDoc) {
+      return res.status(404).json({ message: 'Source branch not found' });
+    }
+    if (!canAccessBranchAsSource(req, sourceBranchId)) {
+      return res.status(403).json({ message: 'You can only copy from branches you have access to' });
+    }
+    const categories = await Category.find({ restaurant: restaurantId, branch: sourceBranchId }).sort({ createdAt: 1 }).lean();
+    const items = await MenuItem.find({ restaurant: restaurantId, branch: sourceBranchId }).populate('category', 'name').lean();
+    res.json({
+      categories: categories.map((c) => ({ id: c._id.toString(), name: c.name, description: c.description || '' })),
+      items: items.map((i) => ({
+        id: i._id.toString(),
+        name: i.name,
+        price: i.price,
+        categoryId: (i.category && i.category._id) ? i.category._id.toString() : i.category?.toString?.() || '',
+        categoryName: i.category?.name || '',
+        description: i.description || '',
+        imageUrl: i.imageUrl || '',
+        dietaryType: i.dietaryType || 'non_veg',
+        showOnWebsite: i.showOnWebsite !== false,
+        inventoryConsumptions: (i.inventoryConsumptions || []).map((c) => ({
+          inventoryItemId: c.inventoryItem?.toString?.(),
+          quantity: c.quantity,
+        })),
+      })),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @route   POST /api/admin/branch-copy/menu
+// @desc    Copy selected categories and items from source branch to current branch (x-branch-id).
+// @access  Restaurant Admin / Admin / Manager
+router.post('/branch-copy/menu', async (req, res, next) => {
+  try {
+    const targetBranchId = getBranchIdForRequest(req);
+    if (!targetBranchId) {
+      return res.status(400).json({ message: 'Select the current branch (x-branch-id) as copy destination' });
+    }
+    const { sourceBranchId, categoryIds = [], itemIds = [] } = req.body;
+    if (!sourceBranchId) {
+      return res.status(400).json({ message: 'sourceBranchId is required' });
+    }
+    const restaurantId = getRestaurantIdForRequest(req);
+    const branchDoc = await Branch.findOne({ _id: sourceBranchId, restaurant: restaurantId });
+    if (!branchDoc) {
+      return res.status(404).json({ message: 'Source branch not found' });
+    }
+    const targetBranchDoc = await Branch.findOne({ _id: targetBranchId, restaurant: restaurantId });
+    if (!targetBranchDoc) {
+      return res.status(404).json({ message: 'Target branch not found' });
+    }
+    if (!canAccessBranchAsSource(req, sourceBranchId)) {
+      return res.status(403).json({ message: 'You can only copy from branches you have access to' });
+    }
+    const allowedTarget = req.user.role === 'super_admin' || req.user.role === 'restaurant_admin' || req.user.role === 'admin' ||
+      (req.user.allowedBranchIds || []).some((id) => String(id) === String(targetBranchId));
+    if (!allowedTarget) {
+      return res.status(403).json({ message: 'You do not have access to the target branch' });
+    }
+
+    const categoryIdList = Array.isArray(categoryIds) ? categoryIds : [];
+    const itemIdList = Array.isArray(itemIds) ? itemIds : [];
+    if (categoryIdList.length === 0 && itemIdList.length === 0) {
+      return res.status(400).json({ message: 'Select at least one category or item to copy' });
+    }
+
+    const sourceCategories = await Category.find({ _id: { $in: categoryIdList }, restaurant: restaurantId, branch: sourceBranchId }).lean();
+    const sourceItems = await MenuItem.find({ _id: { $in: itemIdList }, restaurant: restaurantId, branch: sourceBranchId }).lean();
+    const categoryMap = new Map();
+    for (const cat of sourceCategories) {
+      const existing = await Category.findOne({ restaurant: restaurantId, branch: targetBranchId, name: cat.name.trim() });
+      if (existing) {
+        categoryMap.set(cat._id.toString(), existing._id);
+      } else {
+        const created = await Category.create({
+          restaurant: restaurantId,
+          branch: targetBranchId,
+          name: cat.name,
+          description: cat.description || '',
+        });
+        categoryMap.set(cat._id.toString(), created._id);
+      }
+    }
+    const sourceInvIds = new Set();
+    sourceItems.forEach((item) => {
+      (item.inventoryConsumptions || []).forEach((c) => {
+        if (c.inventoryItem) sourceInvIds.add(c.inventoryItem.toString());
+      });
+    });
+    const sourceInvItems = await InventoryItem.find({ _id: { $in: [...sourceInvIds] }, restaurant: restaurantId }).lean();
+    // Ensure branch-level inventory rows exist for the target branch with zero stock
+    if (sourceInvItems.length > 0) {
+      const existingBranchInv = await BranchInventory.find({
+        branch: targetBranchId,
+        inventoryItem: { $in: [...sourceInvIds] },
+      }).lean();
+      const existingInvSet = new Set(existingBranchInv.map((r) => r.inventoryItem.toString()));
+      for (const inv of sourceInvItems) {
+        if (!existingInvSet.has(inv._id.toString())) {
+          await BranchInventory.create({
+            branch: targetBranchId,
+            inventoryItem: inv._id,
+            currentStock: 0,
+            lowStockThreshold: 0,
+            costPrice: inv.costPrice || 0,
+          });
+        }
+      }
+    }
+
+    let copiedItems = 0;
+    for (const item of sourceItems) {
+      const sourceCatId = (item.category && item.category.toString) ? item.category.toString() : (item.category || '').toString();
+      let targetCategoryId = categoryMap.get(sourceCatId);
+      if (!targetCategoryId && sourceCatId) {
+        const sourceCat = await Category.findById(sourceCatId).lean();
+        if (sourceCat) {
+          const existing = await Category.findOne({ restaurant: restaurantId, branch: targetBranchId, name: sourceCat.name });
+          if (existing) targetCategoryId = existing._id;
+          else {
+            const created = await Category.create({
+              restaurant: restaurantId,
+              branch: targetBranchId,
+              name: sourceCat.name,
+              description: sourceCat.description || '',
+            });
+            targetCategoryId = created._id;
+            categoryMap.set(sourceCatId, targetCategoryId);
+          }
+        }
+      }
+      if (!targetCategoryId) continue;
+      const consumptions = [];
+      for (const c of item.inventoryConsumptions || []) {
+        const invId = c.inventoryItem?.toString?.();
+        if (invId) {
+          consumptions.push({ inventoryItem: invId, quantity: c.quantity || 0 });
+        }
+      }
+      await MenuItem.create({
+        restaurant: restaurantId,
+        branch: targetBranchId,
+        name: item.name,
+        description: item.description || '',
+        price: item.price,
+        category: targetCategoryId,
+        available: item.available !== false,
+        showOnWebsite: item.showOnWebsite !== false,
+        imageUrl: item.imageUrl || null,
+        isFeatured: item.isFeatured || false,
+        isBestSeller: item.isBestSeller || false,
+        dietaryType: item.dietaryType || 'non_veg',
+        inventoryConsumptions: consumptions,
+      });
+      copiedItems += 1;
+    }
+
+    res.json({
+      message: 'Copy completed',
+      copiedCategories: categoryMap.size,
+      copiedItems,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // INVENTORY ROUTES
 // When x-branch-id is set, inventory reads/writes go through BranchInventory.
 // When no branch (owner global view or no branches yet), falls back to InventoryItem.
@@ -1148,30 +1485,127 @@ router.get('/inventory', async (req, res, next) => {
   }
 });
 
+// BRANCH INVENTORY COPY ROUTES
+// @route   GET /api/admin/branch-copy/inventory
+// @desc    List inventory items that have stock rows in a source branch (for copy UI)
+// @access  Restaurant Admin / Admin / Manager
+router.get('/branch-copy/inventory', async (req, res, next) => {
+  try {
+    const sourceBranchId = req.query.sourceBranchId;
+    if (!sourceBranchId) {
+      return res.status(400).json({ message: 'sourceBranchId is required' });
+    }
+    const restaurantId = getRestaurantIdForRequest(req);
+    const branchDoc = await Branch.findOne({ _id: sourceBranchId, restaurant: restaurantId });
+    if (!branchDoc) {
+      return res.status(404).json({ message: 'Source branch not found' });
+    }
+    if (!canAccessBranchAsSource(req, sourceBranchId)) {
+      return res.status(403).json({ message: 'You can only copy from branches you have access to' });
+    }
+    const branchRows = await BranchInventory.find({ branch: sourceBranchId }).populate('inventoryItem').lean();
+    const items = branchRows
+      .filter((row) => row.inventoryItem)
+      .map((row) => ({
+        id: row.inventoryItem._id.toString(),
+        name: row.inventoryItem.name,
+        unit: row.inventoryItem.unit,
+        costPrice: row.inventoryItem.costPrice || 0,
+      }));
+    res.json({ items });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @route   POST /api/admin/branch-copy/inventory
+// @desc    Copy inventory items from source branch to current branch: create BranchInventory rows with stock 0
+// @access  Restaurant Admin / Admin / Manager
+router.post('/branch-copy/inventory', async (req, res, next) => {
+  try {
+    const targetBranchId = getBranchIdForRequest(req);
+    if (!targetBranchId) {
+      return res.status(400).json({ message: 'Select a target branch (x-branch-id) to copy inventory into' });
+    }
+    const { sourceBranchId, itemIds = [] } = req.body;
+    if (!sourceBranchId) {
+      return res.status(400).json({ message: 'sourceBranchId is required' });
+    }
+    const restaurantId = getRestaurantIdForRequest(req);
+    const branchDoc = await Branch.findOne({ _id: sourceBranchId, restaurant: restaurantId });
+    if (!branchDoc) {
+      return res.status(404).json({ message: 'Source branch not found' });
+    }
+    if (!canAccessBranchAsSource(req, sourceBranchId)) {
+      return res.status(403).json({ message: 'You can only copy from branches you have access to' });
+    }
+    const allowedTarget = req.user.role === 'super_admin' || req.user.role === 'restaurant_admin' || req.user.role === 'admin' ||
+      (req.user.allowedBranchIds || []).some((id) => String(id) === String(targetBranchId));
+    if (!allowedTarget) {
+      return res.status(403).json({ message: 'You do not have access to the target branch' });
+    }
+    const itemIdList = Array.isArray(itemIds) ? itemIds : [];
+    if (itemIdList.length === 0) {
+      return res.status(400).json({ message: 'Select at least one inventory item to copy' });
+    }
+    const invItems = await InventoryItem.find({ _id: { $in: itemIdList }, restaurant: restaurantId }).lean();
+    const existing = await BranchInventory.find({
+      branch: targetBranchId,
+      inventoryItem: { $in: itemIdList },
+    }).lean();
+    const existingSet = new Set(existing.map((r) => r.inventoryItem.toString()));
+    let createdCount = 0;
+    for (const inv of invItems) {
+      if (existingSet.has(inv._id.toString())) continue;
+      await BranchInventory.create({
+        branch: targetBranchId,
+        inventoryItem: inv._id,
+        currentStock: 0,
+        lowStockThreshold: 0,
+        costPrice: inv.costPrice || 0,
+      });
+      createdCount += 1;
+    }
+    res.json({ message: 'Inventory copied', created: createdCount });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // @route   POST /api/admin/inventory
 // @desc    Create an inventory item (restaurant-level definition). If x-branch-id is set, also create BranchInventory row.
 // @access  Restaurant Admin / Super Admin
 router.post('/inventory', async (req, res, next) => {
   try {
-    const { name, unit, initialStock, lowStockThreshold, costPrice } = req.body;
+    const { name, unit, initialStock, lowStockThreshold, costPrice, branchId: bodyBranchId } = req.body;
     const restaurantId = getRestaurantIdForRequest(req);
-    const branchId = getBranchIdForRequest(req);
+    const headerBranchId = getBranchIdForRequest(req);
+    let branchId = headerBranchId;
+    if (bodyBranchId && bodyBranchId !== 'all') {
+      const branchDoc = await Branch.findOne({ _id: bodyBranchId, restaurant: restaurantId });
+      if (branchDoc) branchId = branchDoc._id;
+    }
 
     if (!name || !unit) {
       return res.status(400).json({ message: 'Name and unit are required' });
     }
+    if (!branchId) {
+      return res.status(400).json({ message: 'Please select a specific branch before adding inventory.' });
+    }
 
-    // Prevent duplicate inventory item names within the same restaurant
+    const escapedInvName = name.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const existing = await InventoryItem.findOne({
       restaurant: restaurantId,
-      name: { $regex: new RegExp(`^${name.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') },
+      branch: branchId,
+      name: { $regex: new RegExp(`^${escapedInvName}$`, 'i') },
     });
     if (existing) {
-      return res.status(400).json({ message: `An inventory item named "${name.trim()}" already exists` });
+      return res.status(400).json({ message: 'An inventory item with this name already exists in this branch.' });
     }
 
     const item = await InventoryItem.create({
       restaurant: restaurantId,
+      branch: branchId,
       name: name.trim(),
       unit,
       currentStock: branchId ? 0 : (initialStock ?? 0),
@@ -1199,6 +1633,9 @@ router.post('/inventory', async (req, res, next) => {
       costPrice: branchRecord ? branchRecord.costPrice : item.costPrice || 0,
     });
   } catch (error) {
+    if (error.code === 11000) {
+      return res.status(400).json({ message: 'An inventory item with this name already exists in this branch.' });
+    }
     next(error);
   }
 });
@@ -1218,15 +1655,17 @@ router.put('/inventory/:id', async (req, res, next) => {
       return res.status(404).json({ message: 'Inventory item not found' });
     }
 
-    // Update restaurant-level definition (name, unit) regardless
+    // Update definition (name, unit); duplicate name check is per branch
     if (name !== undefined && name.trim() !== item.name) {
+      const branchForDuplicate = item.branch || branchId || null;
       const duplicate = await InventoryItem.findOne({
         restaurant: restaurantId,
+        branch: branchForDuplicate,
+        name: name.trim(),
         _id: { $ne: item._id },
-        name: { $regex: new RegExp(`^${name.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') },
       });
       if (duplicate) {
-        return res.status(400).json({ message: `An inventory item named "${name.trim()}" already exists` });
+        return res.status(400).json({ message: 'An inventory item with this name already exists in this branch.' });
       }
       item.name = name.trim();
     }
@@ -1277,6 +1716,9 @@ router.put('/inventory/:id', async (req, res, next) => {
     });
     }
   } catch (error) {
+    if (error.code === 11000) {
+      return res.status(400).json({ message: 'An inventory item with this name already exists in this branch.' });
+    }
     next(error);
   }
 });

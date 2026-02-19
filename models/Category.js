@@ -8,6 +8,13 @@ const categorySchema = new mongoose.Schema(
       required: true,
       index: true,
     },
+    // Optional branch scoping: when set, this category belongs to a single branch
+    branch: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Branch',
+      default: null,
+      index: true,
+    },
     name: {
       type: String,
       required: true,
@@ -27,7 +34,7 @@ const categorySchema = new mongoose.Schema(
   }
 );
 
-categorySchema.index({ restaurant: 1, name: 1 }, { unique: true });
+categorySchema.index({ restaurant: 1, branch: 1, name: 1 }, { unique: true });
 
 const Category = mongoose.model('Category', categorySchema);
 

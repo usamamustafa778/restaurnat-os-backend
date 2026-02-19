@@ -24,6 +24,13 @@ const menuItemSchema = new mongoose.Schema(
       required: true,
       index: true,
     },
+    // Optional branch scoping: when set, this item belongs to a single branch
+    branch: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Branch',
+      default: null,
+      index: true,
+    },
     name: {
       type: String,
       required: true,
@@ -79,7 +86,7 @@ const menuItemSchema = new mongoose.Schema(
   }
 );
 
-menuItemSchema.index({ restaurant: 1, name: 1 });
+menuItemSchema.index({ restaurant: 1, branch: 1, name: 1 }, { unique: true });
 
 const MenuItem = mongoose.model('MenuItem', menuItemSchema);
 
