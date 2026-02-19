@@ -34,6 +34,11 @@ const branchSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.Mixed,
       default: {},
     },
+    // Optional branch-specific website overrides (hero slides, sections, colors, etc.)
+    websiteOverrides: {
+      type: mongoose.Schema.Types.Mixed,
+      default: {},
+    },
     status: {
       type: String,
       enum: ['active', 'inactive', 'closed_today'],

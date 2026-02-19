@@ -51,10 +51,31 @@ router.get('/menu', async (req, res, next) => {
       return res.status(403).json({ message: 'Restaurant website is not public' });
     }
 
-    const [categories, allItems, inventoryItems] = await Promise.all([
-      Category.find({ restaurant: restaurant._id, isActive: true }).sort({ createdAt: 1 }),
-      MenuItem.find({ restaurant: restaurant._id, available: true, showOnWebsite: true }).populate('category'),
+    // Determine selected branch (from query or default to first active branch)
+    const requestedBranchId = req.query.branchId || null;
+    const activeBranches = await Branch.find({ restaurant: restaurant._id, status: 'active' })
+      .sort({ sortOrder: 1, createdAt: 1 })
+      .select('name code address contactPhone contactEmail openingHours')
+      .lean();
+
+    let selectedBranchId = requestedBranchId;
+    if (!selectedBranchId && activeBranches.length === 1) {
+      selectedBranchId = activeBranches[0]._id.toString();
+    }
+
+    // Build queries scoped by branch (if selected)
+    const categoryQuery = { restaurant: restaurant._id, isActive: true };
+    const menuQuery = { restaurant: restaurant._id, available: true, showOnWebsite: true };
+    if (selectedBranchId) {
+      categoryQuery.branch = selectedBranchId;
+      menuQuery.branch = selectedBranchId;
+    }
+
+    const [categories, allItems, inventoryItems, branchForWebsite] = await Promise.all([
+      Category.find(categoryQuery).sort({ createdAt: 1 }),
+      MenuItem.find(menuQuery).populate('category'),
       InventoryItem.find({ restaurant: restaurant._id }),
+      selectedBranchId ? Branch.findOne({ _id: selectedBranchId, restaurant: restaurant._id }) : null,
     ]);
 
     // Build inventory lookup for sufficiency check
@@ -79,18 +100,46 @@ router.get('/menu', async (req, res, next) => {
 
     const items = allItems.filter(hasEnoughInventory);
 
+    // Build website config with optional branch-specific overrides
+    const rawWebsite = restaurant.website || {};
+    const baseWebsite =
+      typeof rawWebsite.toObject === 'function' ? rawWebsite.toObject() : { ...rawWebsite };
+    delete baseWebsite.openingHours;
+
+    let websiteConfig = { ...baseWebsite };
+    if (branchForWebsite && branchForWebsite.websiteOverrides) {
+      const overrides = branchForWebsite.websiteOverrides;
+      const overrideKeys = [
+        'heroSlides',
+        'socialMedia',
+        'themeColors',
+        'openingHoursText',
+        'websiteSections',
+        'allowWebsiteOrders',
+      ];
+      overrideKeys.forEach((key) => {
+        if (overrides[key] !== undefined) {
+          websiteConfig[key] = overrides[key];
+        }
+      });
+    }
+
     // Populate website sections with full menu item data
-    const rawSections = restaurant.website?.websiteSections || [];
+    const rawSections = websiteConfig.websiteSections || [];
     const websiteSections = [];
     for (const section of rawSections) {
       if (!section.isActive) continue;
       const sectionItemIds = (section.items || []).map((id) => id.toString());
-      const sectionItems = await MenuItem.find({
+      const sectionItemQuery = {
         _id: { $in: sectionItemIds },
         restaurant: restaurant._id,
         available: true,
         showOnWebsite: true,
-      }).populate('category');
+      };
+      if (selectedBranchId) {
+        sectionItemQuery.branch = selectedBranchId;
+      }
+      const sectionItems = await MenuItem.find(sectionItemQuery).populate('category');
 
       // Also filter section items by inventory sufficiency
       const filteredSectionItems = sectionItems.filter(hasEnoughInventory);
@@ -109,18 +158,17 @@ router.get('/menu', async (req, res, next) => {
       });
     }
 
-    // Apply branch overrides if branchId query param is present
-    const requestedBranchId = req.query.branchId;
+    // Apply branch overrides if branchId (selectedBranchId) is present
     let overrideMap = new Map();
-    if (requestedBranchId) {
-      const overrides = await BranchMenuItem.find({ branch: requestedBranchId }).lean();
+    if (selectedBranchId) {
+      const overrides = await BranchMenuItem.find({ branch: selectedBranchId }).lean();
       for (const o of overrides) {
         overrideMap.set(o.menuItem.toString(), o);
       }
     }
 
     // Filter items by branch availability if a branch is selected
-    const branchFilteredItems = requestedBranchId
+    const branchFilteredItems = selectedBranchId
       ? items.filter((item) => {
           const override = overrideMap.get(item._id.toString());
           return override ? override.available !== false : true;
@@ -142,11 +190,7 @@ router.get('/menu', async (req, res, next) => {
       };
     });
 
-    const branches = await Branch.find({ restaurant: restaurant._id, status: 'active' })
-      .sort({ sortOrder: 1, createdAt: 1 })
-      .select('name code address contactPhone contactEmail openingHours')
-      .lean();
-    const branchesPayload = branches.map((b) => ({
+    const branchesPayload = activeBranches.map((b) => ({
       id: b._id.toString(),
       name: b.name,
       code: b.code || '',
@@ -157,22 +201,22 @@ router.get('/menu', async (req, res, next) => {
     }));
 
     res.json({
-      restaurant: {
-        name: restaurant.website?.name,
-        description: restaurant.website?.description,
-        tagline: restaurant.website?.tagline,
-        logoUrl: restaurant.website?.logoUrl,
-        bannerUrl: restaurant.website?.bannerUrl,
-        contactPhone: restaurant.website?.contactPhone,
-        contactEmail: restaurant.website?.contactEmail,
-        address: restaurant.website?.address,
-        subdomain: restaurant.website?.subdomain,
-        heroSlides: restaurant.website?.heroSlides || [],
-        socialMedia: restaurant.website?.socialMedia || {},
-        themeColors: restaurant.website?.themeColors || { primary: '#EF4444', secondary: '#FFA500' },
-        openingHoursText: restaurant.website?.openingHoursText || '',
+    restaurant: {
+        name: websiteConfig.name,
+        description: websiteConfig.description,
+        tagline: websiteConfig.tagline,
+        logoUrl: websiteConfig.logoUrl,
+        bannerUrl: websiteConfig.bannerUrl,
+        contactPhone: websiteConfig.contactPhone,
+        contactEmail: websiteConfig.contactEmail,
+        address: websiteConfig.address,
+        subdomain: websiteConfig.subdomain,
+        heroSlides: websiteConfig.heroSlides || [],
+        socialMedia: websiteConfig.socialMedia || {},
+        themeColors: websiteConfig.themeColors || { primary: '#EF4444', secondary: '#FFA500' },
+        openingHoursText: websiteConfig.openingHoursText || '',
         websiteSections,
-        allowWebsiteOrders: restaurant.website?.allowWebsiteOrders !== false,
+        allowWebsiteOrders: websiteConfig.allowWebsiteOrders !== false,
       },
       menu: response,
       categories: categories.map((c) => ({

@@ -1778,27 +1778,50 @@ router.delete('/inventory/:id', async (req, res, next) => {
 // WEBSITE SETTINGS ROUTES
 
 // @route   GET /api/admin/website
-// @desc    Get website settings for current restaurant
+// @desc    Get website settings for current restaurant (optionally branch-specific)
 // @access  Restaurant Admin / Super Admin
 router.get('/website', async (req, res, next) => {
   try {
     const restaurantId = getRestaurantIdForRequest(req);
+    const branchId = getBranchIdForRequest(req);
     const restaurant = await Restaurant.findById(restaurantId);
     if (!restaurant) {
       return res.status(404).json({ message: 'Restaurant not found' });
     }
 
     const raw = restaurant.website || {};
-    const website = typeof raw.toObject === 'function' ? raw.toObject() : { ...raw };
-    delete website.openingHours;
-    res.json(website);
+    const base = typeof raw.toObject === 'function' ? raw.toObject() : { ...raw };
+    delete base.openingHours;
+
+    let merged = { ...base };
+
+    // When a branch is selected, apply branch-specific overrides if present
+    if (branchId) {
+      const branch = await Branch.findOne({ _id: branchId, restaurant: restaurantId }).lean();
+      const overrides = (branch && branch.websiteOverrides) || {};
+      const overrideKeys = [
+        'heroSlides',
+        'socialMedia',
+        'themeColors',
+        'openingHoursText',
+        'websiteSections',
+        'allowWebsiteOrders',
+      ];
+      overrideKeys.forEach((key) => {
+        if (overrides[key] !== undefined) {
+          merged[key] = overrides[key];
+        }
+      });
+    }
+
+    res.json(merged);
   } catch (error) {
     next(error);
   }
 });
 
 // @route   PUT /api/admin/website
-// @desc    Update website branding/content
+// @desc    Update website branding/content (global + branch-specific parts)
 // @access  Restaurant Admin / Super Admin
 router.put('/website', async (req, res, next) => {
   try {
@@ -1820,6 +1843,7 @@ router.put('/website', async (req, res, next) => {
       allowWebsiteOrders,
     } = req.body;
     const restaurantId = getRestaurantIdForRequest(req);
+    const branchId = getBranchIdForRequest(req);
 
     const restaurant = await Restaurant.findById(restaurantId);
     if (!restaurant) {
@@ -1830,7 +1854,7 @@ router.put('/website', async (req, res, next) => {
       restaurant.website = {};
     }
 
-    // Basic fields
+    // Basic fields (always global across branches)
     if (name !== undefined) restaurant.website.name = name;
     if (logoUrl !== undefined) restaurant.website.logoUrl = logoUrl;
     if (bannerUrl !== undefined) restaurant.website.bannerUrl = bannerUrl;
@@ -1841,24 +1865,73 @@ router.put('/website', async (req, res, next) => {
     if (address !== undefined) restaurant.website.address = address;
     if (typeof isPublic === 'boolean') restaurant.website.isPublic = isPublic;
 
-    // Dynamic content fields
-    if (heroSlides !== undefined) restaurant.website.heroSlides = heroSlides;
-    if (socialMedia !== undefined) restaurant.website.socialMedia = socialMedia;
-    if (themeColors !== undefined) restaurant.website.themeColors = themeColors;
-    if (openingHoursText !== undefined) {
-      restaurant.website.openingHoursText = openingHoursText;
-      restaurant.website.openingHours = {};
+    // Branch-aware dynamic fields
+    const dynamicKeys = [
+      'heroSlides',
+      'socialMedia',
+      'themeColors',
+      'openingHoursText',
+      'websiteSections',
+      'allowWebsiteOrders',
+    ];
+
+    // Helper to assign either globally or into branch overrides
+    let branch = null;
+    let overrides = null;
+    if (branchId) {
+      branch = await Branch.findOne({ _id: branchId, restaurant: restaurantId });
+      if (!branch) {
+        return res.status(404).json({ message: 'Branch not found' });
+      }
+      if (!branch.websiteOverrides) {
+        branch.websiteOverrides = {};
+      }
+      overrides = branch.websiteOverrides;
     }
-    if (websiteSections !== undefined) restaurant.website.websiteSections = websiteSections;
-    if (typeof allowWebsiteOrders === 'boolean') restaurant.website.allowWebsiteOrders = allowWebsiteOrders;
+
+    const assignField = (key, value) => {
+      if (value === undefined) return;
+      if (branchId && overrides) {
+        overrides[key] = value;
+      } else {
+        if (key === 'openingHoursText') {
+          restaurant.website.openingHoursText = value;
+          restaurant.website.openingHours = {};
+        } else {
+          restaurant.website[key] = value;
+        }
+      }
+    };
+
+    assignField('heroSlides', heroSlides);
+    assignField('socialMedia', socialMedia);
+    assignField('themeColors', themeColors);
+    assignField('openingHoursText', openingHoursText);
+    assignField('websiteSections', websiteSections);
+    assignField('allowWebsiteOrders', typeof allowWebsiteOrders === 'boolean' ? allowWebsiteOrders : undefined);
 
     restaurant.markModified('website');
     await restaurant.save();
+    if (branch) {
+      branch.markModified('websiteOverrides');
+      await branch.save();
+    }
 
-    const updated = restaurant.website || {};
-    const out = typeof updated.toObject === 'function' ? updated.toObject() : { ...updated };
-    delete out.openingHours;
-    res.json(out);
+    // Return merged config for this branch (or global if no branch)
+    const raw = restaurant.website || {};
+    const base = typeof raw.toObject === 'function' ? raw.toObject() : { ...raw };
+    delete base.openingHours;
+
+    let merged = { ...base };
+    if (branchId && overrides) {
+      dynamicKeys.forEach((key) => {
+        if (overrides[key] !== undefined) {
+          merged[key] = overrides[key];
+        }
+      });
+    }
+
+    res.json(merged);
   } catch (error) {
     next(error);
   }
