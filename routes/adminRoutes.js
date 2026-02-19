@@ -915,14 +915,16 @@ router.put('/categories/:id', async (req, res, next) => {
       return res.status(404).json({ message: 'Category not found' });
     }
 
-    // Check for duplicate name within the same restaurant (if name is being changed)
+    // Check for duplicate name within the same branch (case-insensitive, same as create)
     if (name !== undefined) {
       const trimmedName = name.trim();
       if (trimmedName !== category.name) {
+        const branchForCheck = category.branch || branchId || null;
+        const escapedName = trimmedName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         const duplicate = await Category.findOne({
           restaurant: restaurantId,
-          branch: branchId || category.branch || null,
-          name: trimmedName,
+          branch: branchForCheck,
+          name: { $regex: new RegExp(`^${escapedName}$`, 'i') },
           _id: { $ne: category._id },
         });
         if (duplicate) {
