@@ -334,6 +334,8 @@ const mapMenuItem = (item, options) => {
   description: item.description || '',
   isFeatured: item.isFeatured || false,
   isBestSeller: item.isBestSeller || false,
+  isTrending: item.isTrending || false,
+  isMustTry: item.isMustTry || false,
   dietaryType: item.dietaryType || 'non_veg',
     inventoryConsumptions: (item.inventoryConsumptions || []).map((c) => {
       const invId = c.inventoryItem?.toString?.();
@@ -1066,6 +1068,7 @@ router.post('/items', async (req, res, next) => {
       }
     }
 
+    const { isTrending, isMustTry } = req.body;
     const item = await MenuItem.create({
       restaurant: restaurantId,
       branch: branchId,
@@ -1076,6 +1079,8 @@ router.post('/items', async (req, res, next) => {
       showOnWebsite: showOnWebsite !== undefined ? !!showOnWebsite : true,
       imageUrl,
       dietaryType: ['veg', 'non_veg', 'egg'].includes(dietaryType) ? dietaryType : 'non_veg',
+      isTrending: typeof isTrending === 'boolean' ? isTrending : false,
+      isMustTry: typeof isMustTry === 'boolean' ? isMustTry : false,
       inventoryConsumptions: normalizedConsumptions,
     });
 
@@ -1094,7 +1099,7 @@ router.post('/items', async (req, res, next) => {
 router.put('/items/:id', async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { name, description, price, categoryId, available, showOnWebsite, imageUrl, isFeatured, isBestSeller, dietaryType, inventoryConsumptions } = req.body;
+    const { name, description, price, categoryId, available, showOnWebsite, imageUrl, isFeatured, isBestSeller, isTrending, isMustTry, dietaryType, inventoryConsumptions } = req.body;
     const restaurantId = getRestaurantIdForRequest(req);
 
     const item = await MenuItem.findOne({ _id: id, restaurant: restaurantId });
@@ -1123,6 +1128,8 @@ router.put('/items/:id', async (req, res, next) => {
     if (imageUrl !== undefined) item.imageUrl = imageUrl;
     if (typeof isFeatured === 'boolean') item.isFeatured = isFeatured;
     if (typeof isBestSeller === 'boolean') item.isBestSeller = isBestSeller;
+    if (typeof isTrending === 'boolean') item.isTrending = isTrending;
+    if (typeof isMustTry === 'boolean') item.isMustTry = isMustTry;
     if (dietaryType !== undefined && ['veg', 'non_veg', 'egg'].includes(dietaryType)) item.dietaryType = dietaryType;
 
     if (categoryId) {

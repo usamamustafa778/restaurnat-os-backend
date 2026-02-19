@@ -2,21 +2,11 @@ const express = require('express');
 const multer = require('multer');
 const { v2: cloudinary } = require('cloudinary');
 const { protect, requireRole, requireRestaurant } = require('../middleware/authMiddleware');
+const { getCloudinaryConfig } = require('../config/cloudinary');
 
 const router = express.Router();
 
-// Check Cloudinary is configured (required for image uploads)
-function getCloudinaryConfig() {
-  const cloud_name = process.env.CLOUDINARY_CLOUD_NAME;
-  const api_key = process.env.CLOUDINARY_API_KEY;
-  const api_secret = process.env.CLOUDINARY_API_SECRET;
-  if (!cloud_name || !api_key || !api_secret) {
-    return null;
-  }
-  return { cloud_name, api_key, api_secret };
-}
-
-// Configure Cloudinary from env (only if all vars present)
+// Configure Cloudinary from env (CLOUDINARY_* vars or CLOUDINARY_URL)
 const cloudinaryEnv = getCloudinaryConfig();
 if (cloudinaryEnv) {
   cloudinary.config(cloudinaryEnv);
@@ -45,7 +35,7 @@ router.post('/image', upload.single('image'), async (req, res, next) => {
   try {
     if (!getCloudinaryConfig()) {
       return res.status(503).json({
-        message: 'Image upload is not configured. Set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET in the server environment.',
+        message: 'Image upload is not configured. Set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET, or CLOUDINARY_URL (e.g. cloudinary://api_key:api_secret@cloud_name).',
       });
     }
     if (!req.file) {

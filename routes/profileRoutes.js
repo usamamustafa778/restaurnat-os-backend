@@ -1,6 +1,7 @@
 const express = require('express');
 const multer = require('multer');
 const { v2: cloudinary } = require('cloudinary');
+const { getCloudinaryConfig } = require('../config/cloudinary');
 const User = require('../models/User');
 const { protect } = require('../middleware/authMiddleware');
 
@@ -122,23 +123,17 @@ router.put('/password', async (req, res, next) => {
 // @access  Authenticated
 router.post('/avatar', upload.single('image'), async (req, res, next) => {
   try {
-    const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
-    const apiKey = process.env.CLOUDINARY_API_KEY;
-    const apiSecret = process.env.CLOUDINARY_API_SECRET;
-    if (!cloudName || !apiKey || !apiSecret) {
+    const cloudinaryEnv = getCloudinaryConfig();
+    if (!cloudinaryEnv) {
       return res.status(503).json({
-        message: 'Image upload is not configured. Set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET in the server environment.',
+        message: 'Image upload is not configured. Set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET, or CLOUDINARY_URL (e.g. cloudinary://api_key:api_secret@cloud_name).',
       });
     }
     if (!req.file) {
       return res.status(400).json({ message: 'No image file provided' });
     }
 
-    cloudinary.config({
-      cloud_name: cloudName,
-      api_key: apiKey,
-      api_secret: apiSecret,
-    });
+    cloudinary.config(cloudinaryEnv);
 
     const result = await new Promise((resolve, reject) => {
       const stream = cloudinary.uploader.upload_stream(
