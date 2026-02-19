@@ -854,11 +854,19 @@ router.post('/categories', async (req, res, next) => {
     const { name, description, branchId: bodyBranchId } = req.body;
     const restaurantId = getRestaurantIdForRequest(req);
     const headerBranchId = getBranchIdForRequest(req);
-    let branchId = headerBranchId;
+    // Prefer body.branchId over header so the branch user is creating in wins (avoids header/localStorage being stale)
+    let branchId = null;
     if (bodyBranchId && bodyBranchId !== 'all') {
       const branchDoc = await Branch.findOne({ _id: bodyBranchId, restaurant: restaurantId });
       if (branchDoc) branchId = branchDoc._id;
+      console.log('[CREATE CATEGORY] body branch lookup:', bodyBranchId, 'found:', !!branchDoc, 'restaurantId:', restaurantId?.toString?.());
     }
+    if (branchId == null) branchId = headerBranchId || null;
+
+    console.log('[CREATE CATEGORY] headerBranchId:', headerBranchId?.toString?.());
+    console.log('[CREATE CATEGORY] bodyBranchId:', bodyBranchId);
+    console.log('[CREATE CATEGORY] resolved branchId for create/duplicate check:', branchId?.toString?.());
+    console.log('[CREATE CATEGORY] restaurantId:', restaurantId?.toString?.());
 
     if (!name || !name.trim()) {
       return res.status(400).json({ message: 'Category name is required' });
@@ -868,11 +876,10 @@ router.post('/categories', async (req, res, next) => {
     }
 
     const escapedName = name.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const existing = await Category.findOne({
-      restaurant: restaurantId,
-      branch: branchId,
-      name: { $regex: new RegExp(`^${escapedName}$`, 'i') },
-    });
+    const duplicateQuery = { restaurant: restaurantId, branch: branchId, name: { $regex: new RegExp(`^${escapedName}$`, 'i') } };
+    console.log('[CREATE CATEGORY] duplicate check query:', { restaurant: restaurantId?.toString?.(), branch: branchId?.toString?.(), name: name?.trim?.() });
+    const existing = await Category.findOne(duplicateQuery);
+    console.log('[CREATE CATEGORY] existing (duplicate) found?', existing ? { id: existing._id?.toString?.(), branch: existing.branch?.toString?.(), name: existing.name } : null);
     if (existing) {
       return res.status(400).json({ message: 'A category with this name already exists in this branch.' });
     }
@@ -1011,11 +1018,19 @@ router.post('/items', async (req, res, next) => {
     const { name, description, price, categoryId, showOnWebsite, imageUrl, dietaryType, inventoryConsumptions, branchId: bodyBranchId } = req.body;
     const restaurantId = getRestaurantIdForRequest(req);
     const headerBranchId = getBranchIdForRequest(req);
-    let branchId = headerBranchId;
+    // Prefer body.branchId over header so the branch user is creating in wins
+    let branchId = null;
     if (bodyBranchId && bodyBranchId !== 'all') {
       const branchDoc = await Branch.findOne({ _id: bodyBranchId, restaurant: restaurantId });
       if (branchDoc) branchId = branchDoc._id;
+      console.log('[CREATE MENU ITEM] body branch lookup:', bodyBranchId, 'found:', !!branchDoc, 'restaurantId:', restaurantId?.toString?.());
     }
+    if (branchId == null) branchId = headerBranchId || null;
+
+    console.log('[CREATE MENU ITEM] headerBranchId:', headerBranchId?.toString?.());
+    console.log('[CREATE MENU ITEM] bodyBranchId:', bodyBranchId);
+    console.log('[CREATE MENU ITEM] resolved branchId for create/duplicate check:', branchId?.toString?.());
+    console.log('[CREATE MENU ITEM] restaurantId:', restaurantId?.toString?.());
 
     if (!name || !name.trim() || price === undefined || !categoryId) {
       return res.status(400).json({ message: 'Name, price and categoryId are required' });
@@ -1032,11 +1047,10 @@ router.post('/items', async (req, res, next) => {
     }
 
     const escapedItemName = name.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const existingItem = await MenuItem.findOne({
-      restaurant: restaurantId,
-      branch: branchId,
-      name: { $regex: new RegExp(`^${escapedItemName}$`, 'i') },
-    });
+    const itemDuplicateQuery = { restaurant: restaurantId, branch: branchId, name: { $regex: new RegExp(`^${escapedItemName}$`, 'i') } };
+    console.log('[CREATE MENU ITEM] duplicate check query:', { restaurant: restaurantId?.toString?.(), branch: branchId?.toString?.(), name: name?.trim?.() });
+    const existingItem = await MenuItem.findOne(itemDuplicateQuery);
+    console.log('[CREATE MENU ITEM] existing (duplicate) found?', existingItem ? { id: existingItem._id?.toString?.(), branch: existingItem.branch?.toString?.(), name: existingItem.name } : null);
     if (existingItem) {
       return res.status(400).json({ message: 'A menu item with this name already exists in this branch.' });
     }
@@ -1580,11 +1594,19 @@ router.post('/inventory', async (req, res, next) => {
     const { name, unit, initialStock, lowStockThreshold, costPrice, branchId: bodyBranchId } = req.body;
     const restaurantId = getRestaurantIdForRequest(req);
     const headerBranchId = getBranchIdForRequest(req);
-    let branchId = headerBranchId;
+    // Prefer body.branchId over header so the branch user is creating in wins
+    let branchId = null;
     if (bodyBranchId && bodyBranchId !== 'all') {
       const branchDoc = await Branch.findOne({ _id: bodyBranchId, restaurant: restaurantId });
       if (branchDoc) branchId = branchDoc._id;
+      console.log('[CREATE INVENTORY] body branch lookup:', bodyBranchId, 'found:', !!branchDoc, 'restaurantId:', restaurantId?.toString?.());
     }
+    if (branchId == null) branchId = headerBranchId || null;
+
+    console.log('[CREATE INVENTORY] headerBranchId:', headerBranchId?.toString?.());
+    console.log('[CREATE INVENTORY] bodyBranchId:', bodyBranchId);
+    console.log('[CREATE INVENTORY] resolved branchId for create/duplicate check:', branchId?.toString?.());
+    console.log('[CREATE INVENTORY] restaurantId:', restaurantId?.toString?.());
 
     if (!name || !unit) {
       return res.status(400).json({ message: 'Name and unit are required' });
@@ -1594,11 +1616,10 @@ router.post('/inventory', async (req, res, next) => {
     }
 
     const escapedInvName = name.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const existing = await InventoryItem.findOne({
-      restaurant: restaurantId,
-      branch: branchId,
-      name: { $regex: new RegExp(`^${escapedInvName}$`, 'i') },
-    });
+    const invDuplicateQuery = { restaurant: restaurantId, branch: branchId, name: { $regex: new RegExp(`^${escapedInvName}$`, 'i') } };
+    console.log('[CREATE INVENTORY] duplicate check query:', { restaurant: restaurantId?.toString?.(), branch: branchId?.toString?.(), name: name?.trim?.() });
+    const existing = await InventoryItem.findOne(invDuplicateQuery);
+    console.log('[CREATE INVENTORY] existing (duplicate) found?', existing ? { id: existing._id?.toString?.(), branch: existing.branch?.toString?.(), name: existing.name } : null);
     if (existing) {
       return res.status(400).json({ message: 'An inventory item with this name already exists in this branch.' });
     }
