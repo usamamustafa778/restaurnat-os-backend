@@ -82,6 +82,9 @@ const mapBranch = (branch) => ({
   openingHours: branch.openingHours || {},
   status: branch.status || 'active',
   sortOrder: branch.sortOrder ?? 0,
+  showTablePos: branch.showTablePos !== false,
+  showWaiterPos: branch.showWaiterPos !== false,
+  showCustomerPos: branch.showCustomerPos !== false,
   createdAt: branch.createdAt?.toISOString?.(),
   updatedAt: branch.updatedAt?.toISOString?.(),
 });
@@ -226,7 +229,7 @@ router.put('/branches/:id', async (req, res, next) => {
     if (req.user.role !== 'super_admin' && req.user.role !== 'restaurant_admin' && (!req.user.allowedBranchIds || !req.user.allowedBranchIds.includes(branch._id.toString()))) {
       return res.status(403).json({ message: 'Access denied to this branch' });
     }
-    const { name, code, address, contactPhone, contactEmail, openingHours, status, sortOrder } = req.body;
+    const { name, code, address, contactPhone, contactEmail, openingHours, status, sortOrder, showTablePos, showWaiterPos, showCustomerPos } = req.body;
     if (name !== undefined) branch.name = name.trim();
     if (code !== undefined) {
       const trimmed = code ? code.trim() : null;
@@ -248,6 +251,9 @@ router.put('/branches/:id', async (req, res, next) => {
     if (openingHours !== undefined) branch.openingHours = openingHours;
     if (status !== undefined) branch.status = status;
     if (sortOrder !== undefined) branch.sortOrder = sortOrder;
+    if (showTablePos !== undefined) branch.showTablePos = !!showTablePos;
+    if (showWaiterPos !== undefined) branch.showWaiterPos = !!showWaiterPos;
+    if (showCustomerPos !== undefined) branch.showCustomerPos = !!showCustomerPos;
     await branch.save();
     res.json(mapBranch(branch));
   } catch (error) {
