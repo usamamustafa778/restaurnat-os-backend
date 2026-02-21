@@ -67,7 +67,7 @@ function getMenuItemIngredientCost(menuItem, inventoryMap) {
 // @access  Staff / Restaurant Admin
 router.post('/orders', async (req, res, next) => {
   try {
-    const { items, orderType, paymentMethod, discountAmount = 0, customerName = '', customerPhone = '', deliveryAddress = '', branchId, tableNumber, tableId, tableName } = req.body;
+    const { items, orderType, paymentMethod, discountAmount = 0, customerName = '', customerPhone = '', deliveryAddress = '', branchId, tableNumber, tableId, tableName, amountReceived } = req.body;
 
     if (!Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ message: 'Order items are required' });
@@ -261,6 +261,18 @@ router.post('/orders', async (req, res, next) => {
       );
     }
 
+    // When payment is taken at creation (Cash/Card), mark order as COMPLETED
+    const paidAtCreation = orderPaymentMethod === 'CASH' || orderPaymentMethod === 'CARD';
+    let paymentAmountReceived = null;
+    let paymentAmountReturned = null;
+    if (paidAtCreation && orderPaymentMethod === 'CASH' && amountReceived != null) {
+      const received = Number(amountReceived);
+      if (!isNaN(received) && received >= total) {
+        paymentAmountReceived = received;
+        paymentAmountReturned = received - total;
+      }
+    }
+
     const order = await Order.create({
       restaurant: req.restaurant._id,
       branch: branch ? branch._id : undefined,
@@ -270,7 +282,9 @@ router.post('/orders', async (req, res, next) => {
       createdBy: req.user.id,
       orderType,
       paymentMethod: orderPaymentMethod,
-      status: 'UNPROCESSED',
+      status: paidAtCreation ? 'COMPLETED' : 'UNPROCESSED',
+      paymentAmountReceived: paymentAmountReceived ?? undefined,
+      paymentAmountReturned: paymentAmountReturned ?? undefined,
       items: orderItems,
       subtotal,
       discountAmount: discount,
@@ -282,6 +296,14 @@ router.post('/orders', async (req, res, next) => {
       deliveryAddress: deliveryAddress || '',
       orderNumber: await generateOrderNumber(req.restaurant._id),
     });
+
+    // When order is completed at creation, free the table if DINE_IN
+    if (paidAtCreation && orderType === 'DINE_IN' && tableNameTrimmed) {
+      await Table.findOneAndUpdate(
+        { restaurant: req.restaurant._id, branch: branch ? branch._id : null, name: tableNameTrimmed },
+        { $set: { isAvailable: true } }
+      );
+    }
 
     res.status(201).json({
       id: order._id,

@@ -425,6 +425,7 @@ const mapOrder = (order) => {
     source: order.source || 'POS',
     externalOrderId: order.externalOrderId || '',
     paymentMethod: paymentLabels[order.paymentMethod] || order.paymentMethod || 'To be paid',
+    isPaid: order.paymentMethod !== 'PENDING',
     paymentStatus: order.status === 'COMPLETED' ? 'PAID' : 'UNPAID',
     paymentAmountReceived: order.paymentAmountReceived ?? null,
     paymentAmountReturned: order.paymentAmountReturned ?? null,
