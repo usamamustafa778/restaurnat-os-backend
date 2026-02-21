@@ -1983,13 +1983,15 @@ router.get('/reports/sales', async (req, res, next) => {
     let totalOrders = orders.length;
     const itemStats = new Map();
     const dailyMap = new Map(); // date YYYY-MM-DD -> total sales
+    const paymentDistribution = {};
+    const isSingleDay = toDate.getTime() - fromDate.getTime() <= 24 * 60 * 60 * 1000;
+    const hourlySales = isSingleDay ? new Array(24).fill(0) : null;
 
-    // Recompute profit for orders that don't have it (e.g. created before profit was stored)
-    const ordersMissingProfit = orders.filter((o) => o.profit == null || o.profit === 0);
+    // Always recompute profit from revenue and cost so report is consistent (not relying on possibly wrong stored order.profit)
+    const menuItemIds = [...new Set(orders.flatMap((o) => o.items.map((i) => i.menuItem)).filter(Boolean))];
     let menuMapForCost = new Map();
     let invCostMapForReport = new Map();
-    if (ordersMissingProfit.length > 0) {
-      const menuItemIds = [...new Set(ordersMissingProfit.flatMap((o) => o.items.map((i) => i.menuItem)))];
+    if (menuItemIds.length > 0) {
       const menuItems = await MenuItem.find({ _id: { $in: menuItemIds }, restaurant: restaurantId });
       for (const m of menuItems) menuMapForCost.set(m._id.toString(), m);
       const invIds = [...new Set(menuItems.flatMap((m) => (m.inventoryConsumptions || []).map((c) => c.inventoryItem?.toString?.()).filter(Boolean)))];
@@ -2010,17 +2012,19 @@ router.get('/reports/sales', async (req, res, next) => {
       totalRevenue += order.total;
       const dateKey = new Date(order.createdAt).toISOString().slice(0, 10);
       dailyMap.set(dateKey, (dailyMap.get(dateKey) || 0) + order.total);
-      if (order.profit != null && order.profit !== 0) {
-        totalProfit += order.profit;
-      } else if (ordersMissingProfit.length > 0 && invCostMapForReport.size > 0) {
-        let orderCost = 0;
+      const pm = order.paymentMethod || 'CASH';
+      paymentDistribution[pm] = (paymentDistribution[pm] || 0) + order.total;
+      if (hourlySales) hourlySales[new Date(order.createdAt).getHours()] += order.total;
+      // Profit = revenue - cost (always recomputed for report consistency)
+      let orderCost = 0;
+      if (invCostMapForReport.size > 0) {
         for (const orderItem of order.items) {
-          const menu = menuMapForCost.get(orderItem.menuItem.toString());
+          const menu = menuMapForCost.get(orderItem.menuItem?.toString?.());
           if (!menu) continue;
           orderCost += computeItemCost(menu, invCostMapForReport) * orderItem.quantity;
         }
-        totalProfit += order.total - orderCost;
       }
+      totalProfit += order.total - orderCost;
       for (const item of order.items) {
         const key = item.menuItem.toString();
         const existing = itemStats.get(key) || {
@@ -2048,15 +2052,37 @@ router.get('/reports/sales', async (req, res, next) => {
       });
     }
 
-    res.json({
+    const sortedTopItems = Array.from(itemStats.values()).sort((a, b) => b.quantity - a.quantity);
+    const menuItemIdsForCategory = [...new Set(sortedTopItems.map((p) => p.menuItemId).filter(Boolean))];
+    const menuItemCategoryMap = new Map();
+    if (menuItemIdsForCategory.length > 0) {
+      const menuItemsWithCat = await MenuItem.find({ _id: { $in: menuItemIdsForCategory }, restaurant: restaurantId })
+        .populate('category', 'name')
+        .lean();
+      for (const mi of menuItemsWithCat) {
+        menuItemCategoryMap.set(mi._id.toString(), mi.category?.name || 'Uncategorized');
+      }
+    }
+    const topItems = sortedTopItems.map((p) => ({
+      name: p.name,
+      menuItemId: p.menuItemId,
+      quantity: p.quantity,
+      revenue: p.revenue,
+      category: menuItemCategoryMap.get(p.menuItemId?.toString?.() || '') || 'Uncategorized',
+    }));
+
+    const payload = {
       from: fromDate,
       to: toDate,
       totalRevenue,
-      totalProfit,
+      totalProfit: Math.round(totalProfit),
       totalOrders,
-      topItems: Array.from(itemStats.values()).sort((a, b) => b.quantity - a.quantity),
+      topItems,
       dailySales,
-    });
+      paymentDistribution,
+    };
+    if (hourlySales) payload.hourlySales = hourlySales;
+    res.json(payload);
   } catch (error) {
     next(error);
   }
