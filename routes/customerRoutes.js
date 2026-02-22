@@ -7,6 +7,7 @@ const Customer = require('../models/Customer');
 const Restaurant = require('../models/Restaurant');
 const Order = require('../models/Order');
 const Branch = require('../models/Branch');
+const { generateOrderNumber } = require('../utils/orderNumber');
 
 const router = express.Router();
 
@@ -308,11 +309,8 @@ router.post('/orders/website', async (req, res, next) => {
       });
     }
 
-    // Generate order number using local date
-    const now = new Date();
-    const todayStr = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}`;
-    const count = await Order.countDocuments({ restaurant: restaurant._id });
-    const orderNumber = `WEB-${todayStr}-${String(count + 1).padStart(4, '0')}`;
+    // Generate order number per branch: WEB-YYYYMMDD-branchIndex-seq
+    const orderNumber = await generateOrderNumber(restaurant._id, branch ? branch._id : null, 'WEB');
 
     // Upsert customer record
     try {

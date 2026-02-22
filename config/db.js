@@ -17,6 +17,12 @@ const connectDB = async (mongoUri) => {
       tablesCol.dropIndex('restaurant_1_branch_1_tableNumber_1').catch(() => {});
     }
 
+    // One-time: drop global unique index on orders.orderNumber so compound (restaurant, branch, orderNumber) is used
+    const ordersCol = conn.connection.db?.collection('orders');
+    if (ordersCol) {
+      ordersCol.dropIndex('orderNumber_1').catch(() => {});
+    }
+
     // Ensure category uniqueness is per (restaurant + branch + name), not per (restaurant + name) or (name) only
     const categoriesCol = conn.connection.db?.collection('categories');
     if (categoriesCol) {

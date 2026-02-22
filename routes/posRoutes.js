@@ -8,41 +8,11 @@ const Branch = require('../models/Branch');
 const Table = require('../models/Table');
 const PosDraft = require('../models/PosDraft');
 const { protect, requireRole, requireRestaurant, checkSubscriptionStatus } = require('../middleware/authMiddleware');
+const { generateOrderNumber } = require('../utils/orderNumber');
 
 const router = express.Router();
 
 router.use(protect, requireRole('staff', 'restaurant_admin', 'admin', 'cashier', 'manager', 'product_manager', 'kitchen_staff', 'order_taker'), requireRestaurant, checkSubscriptionStatus);
-
-/**
- * Generate a sequential order number: ORD-YYYYMMDD-0001, 0002, etc.
- * Resets to 0001 each new day per restaurant.
- */
-const generateOrderNumber = async (restaurantId) => {
-  const now = new Date();
-  const dateStr = `${now.getFullYear()}${(now.getMonth() + 1)
-    .toString()
-    .padStart(2, '0')}${now.getDate().toString().padStart(2, '0')}`;
-  const prefix = `ORD-${dateStr}-`;
-
-  // Find the last order for this restaurant with today's date prefix
-  const lastOrder = await Order.findOne({
-    restaurant: restaurantId,
-    orderNumber: { $regex: `^${prefix}` },
-  })
-    .sort({ orderNumber: -1 })
-    .select('orderNumber')
-    .lean();
-
-  let nextSeq = 1;
-  if (lastOrder && lastOrder.orderNumber) {
-    const lastSeq = parseInt(lastOrder.orderNumber.split('-').pop(), 10);
-    if (!isNaN(lastSeq)) {
-      nextSeq = lastSeq + 1;
-    }
-  }
-
-  return `${prefix}${nextSeq.toString().padStart(4, '0')}`;
-};
 
 // Cost per single unit of a menu item from inventory consumptions (costPrice per 1000g/1000ml/12pc)
 function getMenuItemIngredientCost(menuItem, inventoryMap) {
@@ -294,7 +264,7 @@ router.post('/orders', async (req, res, next) => {
       customerName: customerName || '',
       customerPhone: customerPhone || '',
       deliveryAddress: deliveryAddress || '',
-      orderNumber: await generateOrderNumber(req.restaurant._id),
+      orderNumber: await generateOrderNumber(req.restaurant._id, branch ? branch._id : null, 'ORD'),
     });
 
     // When order is completed at creation, free the table if DINE_IN

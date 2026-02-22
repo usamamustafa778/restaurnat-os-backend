@@ -152,7 +152,6 @@ const orderSchema = new mongoose.Schema(
     orderNumber: {
       type: String,
       required: true,
-      unique: true,
     },
     ingredientCost: {
       type: Number,
@@ -168,6 +167,9 @@ const orderSchema = new mongoose.Schema(
     timestamps: true,
   }
 );
+
+// Uniqueness per branch (and per restaurant when branch is null)
+orderSchema.index({ restaurant: 1, branch: 1, orderNumber: 1 }, { unique: true });
 
 const Order = mongoose.model('Order', orderSchema);
 

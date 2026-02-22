@@ -5,6 +5,7 @@ const MenuItem = require('../models/MenuItem');
 const InventoryItem = require('../models/InventoryItem');
 const Restaurant = require('../models/Restaurant');
 const { protect, requireRole, requireRestaurant, requireActiveSubscription } = require('../middleware/authMiddleware');
+const { generateOrderNumber } = require('../utils/orderNumber');
 
 const router = express.Router();
 
@@ -219,7 +220,7 @@ router.post('/test-order', authMiddleware, async (req, res, next) => {
       subtotal: computedSubtotal,
       discountAmount: discountAmount || 0,
       total: computedTotal,
-      orderNumber: await generateOrderNumber(restaurantId),
+      orderNumber: await generateOrderNumber(restaurantId, null, 'ORD'),
     });
 
     integration.lastSyncAt = new Date();
@@ -238,35 +239,6 @@ router.post('/test-order', authMiddleware, async (req, res, next) => {
 // ────────────────────────────────────────────────────────────────────────────────
 // WEBHOOK – Foodpanda pushes orders here (no JWT auth, uses apiKey verification)
 // ────────────────────────────────────────────────────────────────────────────────
-
-/**
- * Generate a sequential order number: ORD-YYYYMMDD-0001, 0002, etc.
- */
-const generateOrderNumber = async (restaurantId) => {
-  const now = new Date();
-  const dateStr = `${now.getFullYear()}${(now.getMonth() + 1)
-    .toString()
-    .padStart(2, '0')}${now.getDate().toString().padStart(2, '0')}`;
-  const prefix = `ORD-${dateStr}-`;
-
-  const lastOrder = await Order.findOne({
-    restaurant: restaurantId,
-    orderNumber: { $regex: `^${prefix}` },
-  })
-    .sort({ orderNumber: -1 })
-    .select('orderNumber')
-    .lean();
-
-  let nextSeq = 1;
-  if (lastOrder && lastOrder.orderNumber) {
-    const lastSeq = parseInt(lastOrder.orderNumber.split('-').pop(), 10);
-    if (!isNaN(lastSeq)) {
-      nextSeq = lastSeq + 1;
-    }
-  }
-
-  return `${prefix}${nextSeq.toString().padStart(4, '0')}`;
-};
 
 // @route   POST /api/webhooks/foodpanda/:restaurantId
 // @desc    Receive a Foodpanda order (webhook / manual sync)
@@ -369,7 +341,7 @@ router.post('/webhooks/foodpanda/:restaurantId', async (req, res, next) => {
       subtotal: computedSubtotal,
       discountAmount: discountAmount || 0,
       total: computedTotal,
-      orderNumber: await generateOrderNumber(restaurantId),
+      orderNumber: await generateOrderNumber(restaurantId, null, 'ORD'),
     });
 
     // Update last sync time
