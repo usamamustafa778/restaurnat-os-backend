@@ -17,8 +17,7 @@ const subscriptionRequestSchema = new mongoose.Schema(
       required: true,
     },
     paymentScreenshot: {
-      type: String, // Cloudinary URL
-      required: true,
+      type: String, // Cloudinary URL; optional so user can delete and re-upload for pending requests
     },
     paymentMethod: {
       type: mongoose.Schema.Types.ObjectId,

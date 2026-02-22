@@ -174,6 +174,72 @@ router.put(
   }
 );
 
+// @route   DELETE /api/subscription/request/:id/screenshot
+// @desc    Remove payment screenshot from a pending request (keeps request; use DELETE /request/:id to remove request)
+// @access  restaurant_admin
+router.delete(
+  '/request/:id/screenshot',
+  requireRole('restaurant_admin', 'admin'),
+  requireRestaurant,
+  async (req, res, next) => {
+    try {
+      const request = await SubscriptionRequest.findById(req.params.id);
+      if (!request) {
+        return res.status(404).json({ message: 'Subscription request not found.' });
+      }
+      if (request.restaurant.toString() !== req.restaurant._id.toString()) {
+        return res.status(403).json({ message: 'Access denied.' });
+      }
+      if (request.status !== 'pending') {
+        return res.status(400).json({ message: 'Cannot delete screenshot. Request is already ' + request.status + '.' });
+      }
+
+      request.paymentScreenshot = undefined;
+      await request.save();
+
+      res.json({
+        message: 'Payment screenshot removed.',
+        request: {
+          id: request._id,
+          paymentScreenshot: request.paymentScreenshot,
+          status: request.status,
+        },
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+// @route   DELETE /api/subscription/request/:id
+// @desc    Delete a pending subscription request (removes request so user can submit a new one)
+// @access  restaurant_admin
+router.delete(
+  '/request/:id',
+  requireRole('restaurant_admin', 'admin'),
+  requireRestaurant,
+  async (req, res, next) => {
+    try {
+      const request = await SubscriptionRequest.findById(req.params.id);
+      if (!request) {
+        return res.status(404).json({ message: 'Subscription request not found.' });
+      }
+      if (request.restaurant.toString() !== req.restaurant._id.toString()) {
+        return res.status(403).json({ message: 'Access denied.' });
+      }
+      if (request.status !== 'pending') {
+        return res.status(400).json({ message: 'Cannot delete. Request is already ' + request.status + '.' });
+      }
+
+      await SubscriptionRequest.findByIdAndDelete(req.params.id);
+
+      res.json({ message: 'Subscription request removed.' });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
 // @route   GET /api/subscription/history
 // @desc    Get subscription request history for the logged-in restaurant
 // @access  restaurant_admin
