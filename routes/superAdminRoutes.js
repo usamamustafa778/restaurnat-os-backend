@@ -1,6 +1,7 @@
 const express = require('express');
 const Restaurant = require('../models/Restaurant');
 const User = require('../models/User');
+const Branch = require('../models/Branch');
 const { protect, requireRole } = require('../middleware/authMiddleware');
 
 const router = express.Router();
@@ -113,6 +114,36 @@ router.get('/restaurants', async (req, res, next) => {
         createdAt: r.createdAt,
       }))
     );
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @route   GET /api/super/branches
+// @desc    List all branches of all restaurants (super_admin only)
+// @access  Super Admin
+router.get('/branches', async (req, res, next) => {
+  try {
+    const branches = await Branch.find({ isDeleted: { $ne: true } })
+      .populate('restaurant', 'website.subdomain website.name')
+      .sort({ restaurant: 1, sortOrder: 1, createdAt: 1 })
+      .lean();
+
+    const list = branches.map((b) => ({
+      id: b._id.toString(),
+      name: b.name,
+      code: b.code || '',
+      address: b.address || '',
+      contactPhone: b.contactPhone || '',
+      contactEmail: b.contactEmail || '',
+      status: b.status || 'active',
+      sortOrder: b.sortOrder ?? 0,
+      restaurantId: b.restaurant?._id?.toString(),
+      restaurantName: b.restaurant?.website?.name || '—',
+      subdomain: b.restaurant?.website?.subdomain || '—',
+    }));
+
+    res.json({ branches: list });
   } catch (error) {
     next(error);
   }

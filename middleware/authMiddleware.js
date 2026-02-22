@@ -41,6 +41,20 @@ const requireRole = (...roles) => (req, res, next) => {
 
 const requireRestaurant = async (req, res, next) => {
   try {
+    const tenantSlug = req.headers['x-tenant-slug'];
+
+    // Super admin acting as a tenant: load restaurant by x-tenant-slug so POS and other routes work
+    if (req.user?.role === 'super_admin') {
+      if (tenantSlug) {
+        const restaurant = await Restaurant.findOne({ 'website.subdomain': tenantSlug });
+        if (restaurant) {
+          req.restaurant = restaurant;
+          return next();
+        }
+      }
+      return res.status(400).json({ message: 'Super admin must send x-tenant-slug to access tenant resources' });
+    }
+
     if (!req.user?.restaurant) {
       return res.status(400).json({ message: 'User is not linked to any restaurant' });
     }
@@ -51,7 +65,6 @@ const requireRestaurant = async (req, res, next) => {
     }
 
     // Prevent cross-tenant access: verify x-tenant-slug matches the user's restaurant
-    const tenantSlug = req.headers['x-tenant-slug'];
     if (tenantSlug && restaurant.website?.subdomain && tenantSlug !== restaurant.website.subdomain) {
       return res.status(403).json({ message: 'Access denied: you do not have permission to access this restaurant' });
     }

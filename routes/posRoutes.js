@@ -12,7 +12,7 @@ const { generateOrderNumber } = require('../utils/orderNumber');
 
 const router = express.Router();
 
-router.use(protect, requireRole('staff', 'restaurant_admin', 'admin', 'cashier', 'manager', 'product_manager', 'kitchen_staff', 'order_taker'), requireRestaurant, checkSubscriptionStatus);
+router.use(protect, requireRole('super_admin', 'staff', 'restaurant_admin', 'admin', 'cashier', 'manager', 'product_manager', 'kitchen_staff', 'order_taker'), requireRestaurant, checkSubscriptionStatus);
 
 // Cost per single unit of a menu item from inventory consumptions (costPrice per 1000g/1000ml/12pc)
 function getMenuItemIngredientCost(menuItem, inventoryMap) {
@@ -890,7 +890,7 @@ router.delete('/transactions/:id', async (req, res, next) => {
     const restaurantId = req.restaurant._id;
 
     // Only allow restaurant_admin and manager to delete transactions
-    if (!['restaurant_admin', 'manager', 'admin'].includes(req.user.role)) {
+    if (!['super_admin', 'restaurant_admin', 'manager', 'admin'].includes(req.user.role)) {
       return res.status(403).json({ 
         message: 'Only restaurant admins and managers can delete transactions' 
       });

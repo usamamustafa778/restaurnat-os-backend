@@ -32,10 +32,20 @@ router.use(
   )
 );
 
-// If not super admin, load the restaurant linked to the user and enforce active subscription
+// If not super admin, load the restaurant linked to the user and enforce active subscription.
+// For super_admin: when x-tenant-slug is present, load that restaurant so they can "act as" that tenant.
 router.use(async (req, res, next) => {
   try {
+    const tenantSlug = req.headers['x-tenant-slug'];
+
     if (req.user.role === 'super_admin') {
+      // Super admin acting as a tenant: load restaurant by subdomain so all tenant APIs work
+      if (tenantSlug) {
+        const restaurant = await Restaurant.findOne({ 'website.subdomain': tenantSlug });
+        if (restaurant) {
+          req.restaurant = restaurant;
+        }
+      }
       return next();
     }
 
@@ -49,7 +59,6 @@ router.use(async (req, res, next) => {
     }
 
     // Prevent cross-tenant access: verify the x-tenant-slug header matches the user's restaurant
-    const tenantSlug = req.headers['x-tenant-slug'];
     if (tenantSlug && restaurant.website?.subdomain && tenantSlug !== restaurant.website.subdomain) {
       return res.status(403).json({ message: 'Access denied: you do not have permission to access this restaurant' });
     }
@@ -65,8 +74,10 @@ router.use(async (req, res, next) => {
 router.use(resolveBranch);
 
 const getRestaurantIdForRequest = (req) => {
-  if (req.user.role === 'super_admin' && req.query.restaurantId) {
-    return req.query.restaurantId;
+  if (req.user.role === 'super_admin') {
+    if (req.restaurant) return req.restaurant._id;
+    if (req.query.restaurantId) return req.query.restaurantId;
+    return undefined;
   }
   return req.restaurant?._id || req.user.restaurant;
 };
