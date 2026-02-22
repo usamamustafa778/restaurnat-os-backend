@@ -12,6 +12,7 @@ const Restaurant = require('../models/Restaurant');
 const Branch = require('../models/Branch');
 const Table = require('../models/Table');
 const Reservation = require('../models/Reservation');
+const DailyCurrency = require('../models/DailyCurrency');
 const { protect, requireRole, requireRestaurant, checkSubscriptionStatus, resolveBranch } = require('../middleware/authMiddleware');
 
 const router = express.Router();
@@ -2365,6 +2366,56 @@ router.get('/dashboard/summary', async (req, res, next) => {
       topProducts: topProducts.slice(0, 5),
       productsPerformance,
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @route   GET /api/admin/currency/daily
+// @desc    Get daily currency note counts for a date (scoped by x-branch-id when set)
+// @access  Restaurant Admin / Staff
+router.get('/currency/daily', async (req, res, next) => {
+  try {
+    const restaurantId = getRestaurantIdForRequest(req);
+    const branchId = getBranchIdForRequest(req);
+    const date = req.query.date; // YYYY-MM-DD
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(400).json({ message: 'Query param date (YYYY-MM-DD) is required' });
+    }
+    const doc = await DailyCurrency.findOne({ restaurant: restaurantId, branch: branchId || null, date }).lean();
+    const quantities = doc?.quantities && typeof doc.quantities === 'object' ? doc.quantities : {};
+    res.json({ date, quantities });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @route   PUT /api/admin/currency/daily
+// @desc    Save daily currency note counts; only allowed for today or yesterday (server date)
+// @access  Restaurant Admin / Staff
+router.put('/currency/daily', async (req, res, next) => {
+  try {
+    const restaurantId = getRestaurantIdForRequest(req);
+    const branchId = getBranchIdForRequest(req);
+    const { date, quantities } = req.body;
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(400).json({ message: 'Body date (YYYY-MM-DD) is required' });
+    }
+    const now = new Date();
+    const todayStr = now.toISOString().slice(0, 10);
+    const yesterday = new Date(now);
+    yesterday.setDate(yesterday.getDate() - 1);
+    const yesterdayStr = yesterday.toISOString().slice(0, 10);
+    if (date !== todayStr && date !== yesterdayStr) {
+      return res.status(403).json({ message: 'Currency can only be edited for today or yesterday' });
+    }
+    const safeQuantities = typeof quantities === 'object' && quantities !== null ? quantities : {};
+    const doc = await DailyCurrency.findOneAndUpdate(
+      { restaurant: restaurantId, branch: branchId || null, date },
+      { $set: { quantities: safeQuantities } },
+      { new: true, upsert: true }
+    );
+    res.json({ date: doc.date, quantities: doc.quantities || {} });
   } catch (error) {
     next(error);
   }
