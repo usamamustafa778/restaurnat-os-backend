@@ -20,6 +20,7 @@ const subscriptionRoutes = require('./routes/subscriptionRoutes');
 const profileRoutes = require('./routes/profileRoutes');
 const dealRoutes = require('./routes/dealRoutes');
 const menuRoutes = require('./routes/menuRoutes');
+const contactRoutes = require('./routes/contactRoutes');
 
 const app = express();
 
@@ -41,6 +42,7 @@ app.use('/api/subscription', subscriptionRoutes);
 app.use('/api/profile', profileRoutes);
 app.use('/api/deals', dealRoutes);
 app.use('/api/menu', menuRoutes);
+app.use('/api', contactRoutes);
 
 // Health check
 app.get('/health', (req, res) => {

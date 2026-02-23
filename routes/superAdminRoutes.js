@@ -2,6 +2,7 @@ const express = require('express');
 const Restaurant = require('../models/Restaurant');
 const User = require('../models/User');
 const Branch = require('../models/Branch');
+const Lead = require('../models/Lead');
 const { protect, requireRole } = require('../middleware/authMiddleware');
 
 const router = express.Router();
@@ -259,6 +260,27 @@ router.patch('/restaurants/:id/subscription', async (req, res, next) => {
     res.json({
       id: restaurant._id,
       subscription: restaurant.subscription,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @route   GET /api/super/leads
+// @desc    List all contact/lead submissions
+// @access  Super Admin
+router.get('/leads', async (req, res, next) => {
+  try {
+    const leads = await Lead.find({}).sort({ createdAt: -1 }).lean();
+    res.json({
+      leads: leads.map((l) => ({
+        id: l._id,
+        name: l.name,
+        phone: l.phone,
+        email: l.email,
+        message: l.message,
+        createdAt: l.createdAt,
+      })),
     });
   } catch (error) {
     next(error);
