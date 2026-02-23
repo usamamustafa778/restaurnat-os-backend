@@ -190,7 +190,7 @@ router.post('/register-restaurant', async (req, res, next) => {
         name: restaurantName,
         contactPhone: phone || '',
         contactEmail: email.toLowerCase().trim(),
-        isPublic: false, // Owner can enable later
+        isPublic: true, // Website public by default
       },
       subscription: {
         plan: 'ESSENTIAL',
