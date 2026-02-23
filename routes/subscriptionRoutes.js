@@ -14,11 +14,11 @@ router.use(protect);
 // ─────────────────────────────────────────────────────────
 
 // @route   GET /api/subscription/status
-// @desc    Get current subscription status for the logged-in restaurant
-// @access  restaurant_admin, admin, staff etc.
+// @desc    Get current subscription status for the logged-in restaurant (or tenant when super_admin + x-tenant-slug)
+// @access  restaurant_admin, admin, staff, super_admin etc.
 router.get(
   '/status',
-  requireRole('restaurant_admin', 'admin', 'staff', 'manager', 'cashier', 'product_manager', 'kitchen_staff'),
+  requireRole('restaurant_admin', 'admin', 'staff', 'manager', 'cashier', 'product_manager', 'kitchen_staff', 'super_admin'),
   requireRestaurant,
   async (req, res, next) => {
     try {
@@ -62,10 +62,10 @@ const PLAN_DURATIONS = {
 
 // @route   POST /api/subscription/request
 // @desc    Submit a new subscription request with payment screenshot
-// @access  restaurant_admin
+// @access  restaurant_admin, admin, super_admin (when acting as tenant)
 router.post(
   '/request',
-  requireRole('restaurant_admin', 'admin'),
+  requireRole('restaurant_admin', 'admin', 'super_admin'),
   requireRestaurant,
   async (req, res, next) => {
     try {
@@ -130,10 +130,10 @@ router.post(
 
 // @route   PUT /api/subscription/request/:id/screenshot
 // @desc    Update payment screenshot on a pending request
-// @access  restaurant_admin
+// @access  restaurant_admin, admin, super_admin
 router.put(
   '/request/:id/screenshot',
-  requireRole('restaurant_admin', 'admin'),
+  requireRole('restaurant_admin', 'admin', 'super_admin'),
   requireRestaurant,
   async (req, res, next) => {
     try {
@@ -176,10 +176,10 @@ router.put(
 
 // @route   DELETE /api/subscription/request/:id/screenshot
 // @desc    Remove payment screenshot from a pending request (keeps request; use DELETE /request/:id to remove request)
-// @access  restaurant_admin
+// @access  restaurant_admin, admin, super_admin
 router.delete(
   '/request/:id/screenshot',
-  requireRole('restaurant_admin', 'admin'),
+  requireRole('restaurant_admin', 'admin', 'super_admin'),
   requireRestaurant,
   async (req, res, next) => {
     try {
@@ -213,10 +213,10 @@ router.delete(
 
 // @route   DELETE /api/subscription/request/:id
 // @desc    Delete a pending subscription request (removes request so user can submit a new one)
-// @access  restaurant_admin
+// @access  restaurant_admin, admin, super_admin
 router.delete(
   '/request/:id',
-  requireRole('restaurant_admin', 'admin'),
+  requireRole('restaurant_admin', 'admin', 'super_admin'),
   requireRestaurant,
   async (req, res, next) => {
     try {
@@ -241,11 +241,11 @@ router.delete(
 );
 
 // @route   GET /api/subscription/history
-// @desc    Get subscription request history for the logged-in restaurant
-// @access  restaurant_admin
+// @desc    Get subscription request history for the logged-in restaurant (or tenant when super_admin + x-tenant-slug)
+// @access  restaurant_admin, admin, super_admin
 router.get(
   '/history',
-  requireRole('restaurant_admin', 'admin'),
+  requireRole('restaurant_admin', 'admin', 'super_admin'),
   requireRestaurant,
   async (req, res, next) => {
     try {

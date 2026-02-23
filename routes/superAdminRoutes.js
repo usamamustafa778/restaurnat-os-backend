@@ -101,11 +101,11 @@ router.post('/restaurants', async (req, res, next) => {
 });
 
 // @route   GET /api/super/restaurants
-// @desc    List all restaurants with subscription info
+// @desc    List all restaurants with subscription info (excludes soft-deleted)
 // @access  Super Admin
 router.get('/restaurants', async (req, res, next) => {
   try {
-    const restaurants = await Restaurant.find({}).sort({ createdAt: -1 });
+    const restaurants = await Restaurant.find({ isDeleted: { $ne: true } }).sort({ createdAt: -1 });
     res.json(
       restaurants.map((r) => ({
         id: r._id,
@@ -114,6 +114,85 @@ router.get('/restaurants', async (req, res, next) => {
         createdAt: r.createdAt,
       }))
     );
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @route   GET /api/super/restaurants/deleted
+// @desc    List soft-deleted restaurants from the last 48 hours
+// @access  Super Admin
+router.get('/restaurants/deleted', async (req, res, next) => {
+  try {
+    const cutoff = new Date(Date.now() - 48 * 60 * 60 * 1000);
+    const restaurants = await Restaurant.find({
+      isDeleted: true,
+      deletedAt: { $gte: cutoff },
+    })
+      .sort({ deletedAt: -1 })
+      .lean();
+    res.json({
+      restaurants: restaurants.map((r) => ({
+        id: r._id,
+        website: r.website,
+        subscription: r.subscription,
+        createdAt: r.createdAt,
+        deletedAt: r.deletedAt,
+      })),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @route   DELETE /api/super/restaurants/:id
+// @desc    Soft-delete restaurant (recoverable within 48 hours)
+// @access  Super Admin
+router.delete('/restaurants/:id', async (req, res, next) => {
+  try {
+    const restaurant = await Restaurant.findById(req.params.id);
+    if (!restaurant) {
+      return res.status(404).json({ message: 'Restaurant not found' });
+    }
+    if (restaurant.isDeleted) {
+      return res.status(400).json({ message: 'Restaurant is already deleted' });
+    }
+    restaurant.isDeleted = true;
+    restaurant.deletedAt = new Date();
+    await restaurant.save();
+    res.status(204).send();
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @route   POST /api/super/restaurants/:id/restore
+// @desc    Restore a soft-deleted restaurant within 48 hours
+// @access  Super Admin
+router.post('/restaurants/:id/restore', async (req, res, next) => {
+  try {
+    const restaurant = await Restaurant.findById(req.params.id);
+    if (!restaurant) {
+      return res.status(404).json({ message: 'Restaurant not found' });
+    }
+    if (!restaurant.isDeleted || !restaurant.deletedAt) {
+      return res.status(400).json({ message: 'Restaurant is not deleted' });
+    }
+    const now = Date.now();
+    const deletedAtMs = restaurant.deletedAt.getTime();
+    const diffHours = (now - deletedAtMs) / (1000 * 60 * 60);
+    if (diffHours > 48) {
+      return res.status(400).json({ message: 'Restore window (48 hours) has expired for this restaurant' });
+    }
+    restaurant.isDeleted = false;
+    restaurant.deletedAt = null;
+    await restaurant.save();
+    res.json({
+      id: restaurant._id,
+      website: restaurant.website,
+      subscription: restaurant.subscription,
+      createdAt: restaurant.createdAt,
+    });
   } catch (error) {
     next(error);
   }

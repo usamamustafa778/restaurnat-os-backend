@@ -3,6 +3,7 @@ const multer = require('multer');
 const { v2: cloudinary } = require('cloudinary');
 const { getCloudinaryConfig } = require('../config/cloudinary');
 const User = require('../models/User');
+const Restaurant = require('../models/Restaurant');
 const { protect } = require('../middleware/authMiddleware');
 
 const router = express.Router();
@@ -23,12 +24,27 @@ const upload = multer({
 // All profile routes require authentication
 router.use(protect);
 
+// Resolve which user's profile to show/edit: when super_admin + x-tenant-slug, use that tenant's restaurant owner
+async function getProfileUserId(req) {
+  const tenantSlug = req.headers['x-tenant-slug'];
+  if (req.user.role === 'super_admin' && tenantSlug) {
+    const slug = String(tenantSlug).toLowerCase().trim();
+    const restaurant = await Restaurant.findOne({ 'website.subdomain': slug }).lean();
+    if (restaurant) {
+      const owner = await User.findOne({ role: 'restaurant_admin', restaurant: restaurant._id }).select('_id').lean();
+      if (owner) return owner._id.toString();
+    }
+  }
+  return req.user.id;
+}
+
 // @route   GET /api/profile
-// @desc    Get current user profile
+// @desc    Get current user profile; when super_admin + x-tenant-slug returns that tenant's (restaurant owner) profile
 // @access  Authenticated
 router.get('/', async (req, res, next) => {
   try {
-    const user = await User.findById(req.user.id).select('-password');
+    const userId = await getProfileUserId(req);
+    const user = await User.findById(userId).select('-password');
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
     }
@@ -46,15 +62,16 @@ router.get('/', async (req, res, next) => {
 });
 
 // @route   PUT /api/profile
-// @desc    Update current user name & email
+// @desc    Update current user name & email (or tenant owner when super_admin + x-tenant-slug)
 // @access  Authenticated
 router.put('/', async (req, res, next) => {
   try {
-    const { name, email } = req.body;
-    const user = await User.findById(req.user.id);
+    const userId = await getProfileUserId(req);
+    const user = await User.findById(userId);
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
     }
+    const { name, email } = req.body;
 
     if (name !== undefined) {
       if (!name.trim()) return res.status(400).json({ message: 'Name is required' });
@@ -86,7 +103,7 @@ router.put('/', async (req, res, next) => {
 });
 
 // @route   PUT /api/profile/password
-// @desc    Change password (requires current password)
+// @desc    Change password (requires current password); when super_admin + x-tenant-slug updates tenant owner
 // @access  Authenticated
 router.put('/password', async (req, res, next) => {
   try {
@@ -99,7 +116,8 @@ router.put('/password', async (req, res, next) => {
       return res.status(400).json({ message: 'New password must be at least 6 characters' });
     }
 
-    const user = await User.findById(req.user.id);
+    const userId = await getProfileUserId(req);
+    const user = await User.findById(userId);
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
     }
@@ -150,7 +168,8 @@ router.post('/avatar', upload.single('image'), async (req, res, next) => {
       stream.end(req.file.buffer);
     });
 
-    const user = await User.findById(req.user.id);
+    const userId = await getProfileUserId(req);
+    const user = await User.findById(userId);
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
     }
@@ -168,11 +187,12 @@ router.post('/avatar', upload.single('image'), async (req, res, next) => {
 });
 
 // @route   DELETE /api/profile/avatar
-// @desc    Remove profile image
+// @desc    Remove profile image (or tenant owner when super_admin + x-tenant-slug)
 // @access  Authenticated
 router.delete('/avatar', async (req, res, next) => {
   try {
-    const user = await User.findById(req.user.id);
+    const userId = await getProfileUserId(req);
+    const user = await User.findById(userId);
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
     }

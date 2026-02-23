@@ -121,6 +121,8 @@ const restaurantSchema = new mongoose.Schema(
     website: websiteSettingsSchema,
     subscription: subscriptionSchema,
     readonly: { type: Boolean, default: false },
+    isDeleted: { type: Boolean, default: false, index: true },
+    deletedAt: { type: Date, default: null },
     settings: {
       // POS / inventory behaviour that may be configurable later
       allowOrderWhenOutOfStock: {
