@@ -8,6 +8,7 @@ const Restaurant = require('../models/Restaurant');
 const Order = require('../models/Order');
 const Branch = require('../models/Branch');
 const { generateOrderNumber } = require('../utils/orderNumber');
+const { getOrderRooms } = require('../utils/socketRooms');
 
 const router = express.Router();
 
@@ -349,6 +350,13 @@ router.post('/orders/website', async (req, res, next) => {
       total: subtotal,
       orderNumber,
     });
+
+    const io = req.app.get('io');
+    if (io) {
+      const rooms = getOrderRooms(order.restaurant, order.branch);
+      const payload = { id: order._id.toString(), orderNumber: order.orderNumber, status: order.status, createdAt: order.createdAt };
+      rooms.forEach((room) => io.to(room).emit('order:created', payload));
+    }
 
     res.status(201).json({
       message: 'Order placed successfully!',

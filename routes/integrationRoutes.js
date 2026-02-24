@@ -6,6 +6,7 @@ const InventoryItem = require('../models/InventoryItem');
 const Restaurant = require('../models/Restaurant');
 const { protect, requireRole, requireRestaurant, requireActiveSubscription } = require('../middleware/authMiddleware');
 const { generateOrderNumber } = require('../utils/orderNumber');
+const { getOrderRooms } = require('../utils/socketRooms');
 
 const router = express.Router();
 
@@ -223,6 +224,13 @@ router.post('/test-order', authMiddleware, async (req, res, next) => {
       orderNumber: await generateOrderNumber(restaurantId, null, 'ORD'),
     });
 
+    const io = req.app.get('io');
+    if (io) {
+      const rooms = getOrderRooms(order.restaurant, order.branch);
+      const payload = { id: order._id.toString(), orderNumber: order.orderNumber, status: order.status, createdAt: order.createdAt };
+      rooms.forEach((room) => io.to(room).emit('order:created', payload));
+    }
+
     integration.lastSyncAt = new Date();
     await integration.save();
 
@@ -343,6 +351,13 @@ router.post('/webhooks/foodpanda/:restaurantId', async (req, res, next) => {
       total: computedTotal,
       orderNumber: await generateOrderNumber(restaurantId, null, 'ORD'),
     });
+
+    const io = req.app.get('io');
+    if (io) {
+      const rooms = getOrderRooms(order.restaurant, order.branch);
+      const payload = { id: order._id.toString(), orderNumber: order.orderNumber, status: order.status, createdAt: order.createdAt };
+      rooms.forEach((room) => io.to(room).emit('order:created', payload));
+    }
 
     // Update last sync time
     integration.lastSyncAt = new Date();

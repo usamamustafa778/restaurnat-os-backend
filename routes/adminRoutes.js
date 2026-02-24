@@ -14,6 +14,7 @@ const Table = require('../models/Table');
 const Reservation = require('../models/Reservation');
 const DailyCurrency = require('../models/DailyCurrency');
 const { protect, requireRole, requireRestaurant, checkSubscriptionStatus, resolveBranch } = require('../middleware/authMiddleware');
+const { getOrderRooms } = require('../utils/socketRooms');
 
 const router = express.Router();
 
@@ -752,6 +753,13 @@ router.put('/orders/:id/status', async (req, res, next) => {
     order.status = status;
     await order.save();
 
+    const io = req.app.get('io');
+    if (io) {
+      const rooms = getOrderRooms(order.restaurant, order.branch);
+      const payload = { id: order._id.toString(), orderNumber: order.orderNumber, status: order.status };
+      rooms.forEach((room) => io.to(room).emit('order:updated', payload));
+    }
+
     // When order is completed or cancelled, free the table (set isAvailable = true)
     if ((status === 'COMPLETED' || status === 'CANCELLED') && order.tableName && order.tableName.trim()) {
       await Table.findOneAndUpdate(
@@ -822,6 +830,13 @@ router.put('/orders/:id/payment', async (req, res, next) => {
       order.status = 'COMPLETED';
     }
     await order.save();
+
+    const io = req.app.get('io');
+    if (io) {
+      const rooms = getOrderRooms(order.restaurant, order.branch);
+      const payload = { id: order._id.toString(), orderNumber: order.orderNumber, status: order.status };
+      rooms.forEach((room) => io.to(room).emit('order:updated', payload));
+    }
 
     if (!wasAlreadyCompleted && order.tableName && order.tableName.trim()) {
       await Table.findOneAndUpdate(
@@ -2812,6 +2827,13 @@ router.put('/kitchen/orders/:id/status', async (req, res, next) => {
 
     order.status = status;
     await order.save();
+
+    const io = req.app.get('io');
+    if (io) {
+      const rooms = getOrderRooms(order.restaurant, order.branch);
+      const payload = { id: order._id.toString(), orderNumber: order.orderNumber, status: order.status };
+      rooms.forEach((room) => io.to(room).emit('order:updated', payload));
+    }
 
     // When order is completed or cancelled, free the table (set isAvailable = true)
     if ((status === 'COMPLETED' || status === 'CANCELLED') && order.tableName && order.tableName.trim()) {

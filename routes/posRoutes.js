@@ -9,6 +9,7 @@ const Table = require('../models/Table');
 const PosDraft = require('../models/PosDraft');
 const { protect, requireRole, requireRestaurant, checkSubscriptionStatus } = require('../middleware/authMiddleware');
 const { generateOrderNumber } = require('../utils/orderNumber');
+const { getOrderRooms } = require('../utils/socketRooms');
 
 const router = express.Router();
 
@@ -273,6 +274,13 @@ router.post('/orders', async (req, res, next) => {
         { restaurant: req.restaurant._id, branch: branch ? branch._id : null, name: tableNameTrimmed },
         { $set: { isAvailable: true } }
       );
+    }
+
+    const io = req.app.get('io');
+    if (io) {
+      const rooms = getOrderRooms(order.restaurant, order.branch);
+      const payload = { id: order._id.toString(), orderNumber: order.orderNumber, status: order.status, createdAt: order.createdAt };
+      rooms.forEach((room) => io.to(room).emit('order:created', payload));
     }
 
     res.status(201).json({
