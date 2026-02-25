@@ -1012,7 +1012,7 @@ socket.io-parser@~4.2.4:
     "@socket.io/component-emitter" "~3.1.0"
     debug "~4.4.1"
 
-socket.io@^4.7.2:
+socket.io@^4.8.3:
   version "4.8.3"
   resolved "https://registry.npmjs.org/socket.io/-/socket.io-4.8.3.tgz"
   integrity sha512-2Dd78bqzzjE6KPkD5fHZmDAKRNe3J15q+YHDrIsy9WEkqttc7GY+kT9OBLSMaPbQaEd0x1BjcmtMtXkfpc+T5A==
