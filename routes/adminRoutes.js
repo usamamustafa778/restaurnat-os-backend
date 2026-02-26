@@ -401,21 +401,15 @@ const mapCustomer = (customer) => ({
 });
 
 const mapOrder = (order) => {
-  // Derive customer name from different sources
-  let customerName = order.customerName || '';
-  if (!customerName && order.createdBy && typeof order.createdBy === 'object' && order.createdBy.name) {
-    customerName = order.createdBy.name;
-  }
-  if (!customerName) {
-    customerName = order.source === 'FOODPANDA' ? 'Foodpanda Customer' : 'Walk\u2011in Customer';
-  }
-
   const paymentLabels = { PENDING: 'To be paid', CASH: 'Cash', CARD: 'Card', ONLINE: 'Online', OTHER: 'Other' };
+  const rawCustomerName = order.customerName || '';
+  const orderTakerName = (order.createdBy && typeof order.createdBy === 'object' && order.createdBy.name) ? order.createdBy.name : '';
 
   return {
     id: order.orderNumber || order._id.toString(),
     _id: order._id.toString(),
-    customerName,
+    customerName: rawCustomerName,
+    orderTakerName,
     customerPhone: order.customerPhone || '',
     deliveryAddress: order.deliveryAddress || '',
     tableNumber: order.tableNumber || '',
