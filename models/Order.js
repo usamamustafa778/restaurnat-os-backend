@@ -102,8 +102,8 @@ const orderSchema = new mongoose.Schema(
     paymentAmountReturned: { type: Number, default: null },
     status: {
       type: String,
-      enum: ['UNPROCESSED', 'PENDING', 'READY', 'COMPLETED', 'CANCELLED'],
-      default: 'UNPROCESSED',
+      enum: ['NEW_ORDER', 'PROCESSING', 'READY', 'DELIVERED', 'CANCELLED'],
+      default: 'NEW_ORDER',
     },
     source: {
       type: String,

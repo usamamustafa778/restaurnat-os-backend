@@ -340,7 +340,7 @@ router.post('/orders/website', async (req, res, next) => {
       orderType: 'DELIVERY',
       paymentMethod: 'CASH',
       source: 'WEBSITE',
-      status: 'UNPROCESSED',
+      status: 'NEW_ORDER',
       customerName: (customerName || '').trim() || 'Website Customer',
       customerPhone: customerPhone.trim(),
       deliveryAddress: (deliveryAddress || '').trim(),

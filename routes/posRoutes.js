@@ -253,7 +253,7 @@ router.post('/orders', async (req, res, next) => {
       createdBy: req.user.id,
       orderType,
       paymentMethod: orderPaymentMethod,
-      status: paidAtCreation ? 'COMPLETED' : 'UNPROCESSED',
+      status: paidAtCreation ? 'DELIVERED' : 'NEW_ORDER',
       paymentAmountReceived: paymentAmountReceived ?? undefined,
       paymentAmountReturned: paymentAmountReturned ?? undefined,
       items: orderItems,
@@ -306,7 +306,7 @@ router.post('/orders/:id/cancel', async (req, res, next) => {
     const order = await Order.findOne({
       _id: id,
       restaurant: req.restaurant._id,
-      status: { $in: ['UNPROCESSED', 'PENDING', 'READY', 'COMPLETED'] },
+      status: { $in: ['NEW_ORDER', 'PROCESSING', 'READY', 'DELIVERED'] },
     });
 
     if (!order) {
@@ -738,7 +738,7 @@ router.get('/transactions', async (req, res, next) => {
       filter.status = status;
     } else {
       // Default: show completed orders (sales transactions)
-      filter.status = { $in: ['COMPLETED', 'READY', 'UNPROCESSED'] };
+      filter.status = { $in: ['DELIVERED', 'READY', 'NEW_ORDER'] };
     }
 
     // Filter by payment method

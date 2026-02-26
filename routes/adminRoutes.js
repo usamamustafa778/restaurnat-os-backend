@@ -439,7 +439,7 @@ const mapOrder = (order) => {
     externalOrderId: order.externalOrderId || '',
     paymentMethod: paymentLabels[order.paymentMethod] || order.paymentMethod || 'To be paid',
     isPaid: order.paymentMethod !== 'PENDING',
-    paymentStatus: order.status === 'COMPLETED' ? 'PAID' : 'UNPAID',
+    paymentStatus: (order.status === 'DELIVERED' || order.status === 'COMPLETED') ? 'PAID' : 'UNPAID',
     paymentAmountReceived: order.paymentAmountReceived ?? null,
     paymentAmountReturned: order.paymentAmountReturned ?? null,
   };
@@ -728,7 +728,7 @@ router.put('/orders/:id/status', async (req, res, next) => {
     const { status } = req.body;
     const restaurantId = getRestaurantIdForRequest(req);
 
-    if (!['UNPROCESSED', 'PENDING', 'READY', 'COMPLETED', 'CANCELLED'].includes(status)) {
+    if (!['NEW_ORDER', 'PROCESSING', 'READY', 'DELIVERED', 'CANCELLED'].includes(status)) {
       return res.status(400).json({ message: 'Invalid status' });
     }
 
@@ -754,8 +754,8 @@ router.put('/orders/:id/status', async (req, res, next) => {
       rooms.forEach((room) => io.to(room).emit('order:updated', payload));
     }
 
-    // When order is completed or cancelled, free the table (set isAvailable = true)
-    if ((status === 'COMPLETED' || status === 'CANCELLED') && order.tableName && order.tableName.trim()) {
+    // When order is delivered or cancelled, free the table (set isAvailable = true)
+    if ((status === 'DELIVERED' || status === 'CANCELLED') && order.tableName && order.tableName.trim()) {
       await Table.findOneAndUpdate(
         { restaurant: order.restaurant, branch: order.branch || null, name: order.tableName.trim() },
         { $set: { isAvailable: true } }
@@ -816,12 +816,12 @@ router.put('/orders/:id/payment', async (req, res, next) => {
       returned = null;
     }
 
-    const wasAlreadyCompleted = order.status === 'COMPLETED';
+    const wasAlreadyDelivered = order.status === 'DELIVERED';
     order.paymentMethod = paymentMethod;
     order.paymentAmountReceived = received;
     order.paymentAmountReturned = returned;
-    if (!wasAlreadyCompleted) {
-      order.status = 'COMPLETED';
+    if (!wasAlreadyDelivered) {
+      order.status = 'DELIVERED';
     }
     await order.save();
 
@@ -832,7 +832,7 @@ router.put('/orders/:id/payment', async (req, res, next) => {
       rooms.forEach((room) => io.to(room).emit('order:updated', payload));
     }
 
-    if (!wasAlreadyCompleted && order.tableName && order.tableName.trim()) {
+    if (!wasAlreadyDelivered && order.tableName && order.tableName.trim()) {
       await Table.findOneAndUpdate(
         { restaurant: order.restaurant, branch: order.branch || null, name: order.tableName.trim() },
         { $set: { isAvailable: true } }
@@ -2054,7 +2054,7 @@ router.get('/reports/sales', async (req, res, next) => {
     const fromDate = from ? new Date(from) : new Date(new Date().setHours(0, 0, 0, 0));
     const toDate = to ? new Date(to) : new Date(new Date().setHours(23, 59, 59, 999));
 
-    const orderFilter = { restaurant: restaurantId, status: 'COMPLETED', createdAt: { $gte: fromDate, $lte: toDate } };
+    const orderFilter = { restaurant: restaurantId, status: 'DELIVERED', createdAt: { $gte: fromDate, $lte: toDate } };
     if (branchId) orderFilter.branch = branchId;
     const orders = await Order.find(orderFilter);
 
@@ -2195,7 +2195,7 @@ router.get('/reports/day', async (req, res, next) => {
     const mcMap = new Map();
     for (const m of mItems) mcMap.set(m._id.toString(), computeItemCost(m, iMap));
 
-    const completed = allOrders.filter(o => o.status === 'COMPLETED');
+    const completed = allOrders.filter(o => o.status === 'DELIVERED');
     const cancelled = allOrders.filter(o => o.status === 'CANCELLED');
     const grossSales = completed.reduce((s, o) => s + o.subtotal, 0);
     const totalDisc = completed.reduce((s, o) => s + (o.discountAmount || 0), 0);
@@ -2287,19 +2287,19 @@ router.get('/dashboard/summary', async (req, res, next) => {
     const orderFilter = { restaurant: restaurantId, createdAt: { $gte: startOfDay, $lte: endOfDay } };
     if (branchId) orderFilter.branch = branchId;
 
-    const pendingFilter = { restaurant: restaurantId, status: { $in: ['UNPROCESSED', 'PENDING', 'READY'] } };
+    const pendingFilter = { restaurant: restaurantId, status: { $in: ['NEW_ORDER', 'PROCESSING', 'READY'] } };
     if (branchId) pendingFilter.branch = branchId;
 
     const sevenDaysAgo = new Date();
     sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
     sevenDaysAgo.setHours(0, 0, 0, 0);
-    const orderFilterLast7 = { restaurant: restaurantId, status: 'COMPLETED', createdAt: { $gte: sevenDaysAgo, $lte: endOfDay } };
+    const orderFilterLast7 = { restaurant: restaurantId, status: 'DELIVERED', createdAt: { $gte: sevenDaysAgo, $lte: endOfDay } };
     if (branchId) orderFilterLast7.branch = branchId;
 
     // Orders for the current month (completed only) for products performance
     const monthlyCompletedFilter = {
       restaurant: restaurantId,
-      status: 'COMPLETED',
+      status: 'DELIVERED',
       createdAt: { $gte: startOfMonth, $lte: endOfDay },
     };
     if (branchId) monthlyCompletedFilter.branch = branchId;
@@ -2322,7 +2322,7 @@ router.get('/dashboard/summary', async (req, res, next) => {
       Category.find({ restaurant: restaurantId }),
     ]);
 
-    const completedOrders = allTodayOrders.filter(o => o.status === 'COMPLETED');
+    const completedOrders = allTodayOrders.filter(o => o.status === 'DELIVERED');
     const pendingOrders = pendingOrdersList;
     const todaysRevenue = completedOrders.reduce((s, o) => s + o.total, 0);
     const todaysOrdersCount = completedOrders.length;
@@ -2797,7 +2797,7 @@ router.get('/kitchen/orders', async (req, res, next) => {
 
     const query = { 
       restaurant: restaurantId,
-      status: { $in: ['UNPROCESSED', 'PENDING', 'READY'] },
+      status: { $in: ['NEW_ORDER', 'PROCESSING', 'READY'] },
     };
     if (branchId) query.branch = branchId;
 
@@ -2808,15 +2808,15 @@ router.get('/kitchen/orders', async (req, res, next) => {
 
     // Group by status for KDS columns
     const grouped = {
-      newOrders: orders.filter(o => o.status === 'UNPROCESSED'),
-      inKitchen: orders.filter(o => o.status === 'PENDING'),
+      newOrders: orders.filter(o => o.status === 'NEW_ORDER'),
+      inKitchen: orders.filter(o => o.status === 'PROCESSING'),
       ready: orders.filter(o => o.status === 'READY'),
     };
 
     // Detect delayed orders (older than 20 minutes and still in kitchen)
     const twentyMinutesAgo = new Date(Date.now() - 20 * 60 * 1000);
     const delayed = orders.filter(o => 
-      o.status === 'PENDING' && new Date(o.createdAt) < twentyMinutesAgo
+      o.status === 'PROCESSING' && new Date(o.createdAt) < twentyMinutesAgo
     ).map(o => o._id.toString());
 
     const mapKitchenOrder = (o) => ({
@@ -2844,7 +2844,7 @@ router.get('/kitchen/orders', async (req, res, next) => {
 });
 
 // @route   PUT /api/admin/kitchen/orders/:id/status
-// @desc    Update order status from KDS (UNPROCESSED -> PENDING -> READY -> COMPLETED)
+// @desc    Update order status from KDS (NEW_ORDER -> PROCESSING -> READY -> DELIVERED)
 // @access  Restaurant Admin / Kitchen Staff
 router.put('/kitchen/orders/:id/status', async (req, res, next) => {
   try {
@@ -2853,7 +2853,7 @@ router.put('/kitchen/orders/:id/status', async (req, res, next) => {
     const restaurantId = getRestaurantIdForRequest(req);
     const branchId = getBranchIdForRequest(req);
 
-    const allowedStatuses = ['UNPROCESSED', 'PENDING', 'READY', 'COMPLETED', 'CANCELLED'];
+    const allowedStatuses = ['NEW_ORDER', 'PROCESSING', 'READY', 'DELIVERED', 'CANCELLED'];
     if (!allowedStatuses.includes(status)) {
       return res.status(400).json({ message: 'Invalid status' });
     }
@@ -2882,8 +2882,8 @@ router.put('/kitchen/orders/:id/status', async (req, res, next) => {
       rooms.forEach((room) => io.to(room).emit('order:updated', payload));
     }
 
-    // When order is completed or cancelled, free the table (set isAvailable = true)
-    if ((status === 'COMPLETED' || status === 'CANCELLED') && order.tableName && order.tableName.trim()) {
+    // When order is delivered or cancelled, free the table (set isAvailable = true)
+    if ((status === 'DELIVERED' || status === 'CANCELLED') && order.tableName && order.tableName.trim()) {
       await Table.findOneAndUpdate(
         { restaurant: order.restaurant, branch: order.branch || null, name: order.tableName.trim() },
         { $set: { isAvailable: true } }
