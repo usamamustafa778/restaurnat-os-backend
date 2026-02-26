@@ -129,6 +129,10 @@ const restaurantSchema = new mongoose.Schema(
         type: Boolean,
         default: false,
       },
+      // Shared restaurant logo used in POS / printed bills (separate from website logo)
+      restaurantLogoUrl: {
+        type: String,
+      },
     },
   },
   {

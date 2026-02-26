@@ -1854,6 +1854,59 @@ router.get('/website', async (req, res, next) => {
   }
 });
 
+// RESTAURANT SETTINGS ROUTES (POS / shared settings)
+
+// @route   GET /api/admin/settings
+// @desc    Get restaurant-level settings (shared across branches)
+// @access  Restaurant Admin / Super Admin
+router.get('/settings', async (req, res, next) => {
+  try {
+    const restaurantId = getRestaurantIdForRequest(req);
+    const restaurant = await Restaurant.findById(restaurantId).select('settings');
+    if (!restaurant) {
+      return res.status(404).json({ message: 'Restaurant not found' });
+    }
+    return res.json(restaurant.settings || {});
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @route   PUT /api/admin/settings
+// @desc    Update restaurant-level settings (e.g. POS behaviour, bill logo)
+// @access  Restaurant Admin / Super Admin
+router.put('/settings', async (req, res, next) => {
+  try {
+    const restaurantId = getRestaurantIdForRequest(req);
+    const restaurant = await Restaurant.findById(restaurantId);
+    if (!restaurant) {
+      return res.status(404).json({ message: 'Restaurant not found' });
+    }
+
+    if (!restaurant.settings) {
+      restaurant.settings = {};
+    }
+
+    const {
+      allowOrderWhenOutOfStock,
+      restaurantLogoUrl,
+    } = req.body;
+
+    if (typeof allowOrderWhenOutOfStock === 'boolean') {
+      restaurant.settings.allowOrderWhenOutOfStock = allowOrderWhenOutOfStock;
+    }
+
+    if (restaurantLogoUrl !== undefined) {
+      restaurant.settings.restaurantLogoUrl = restaurantLogoUrl;
+    }
+
+    await restaurant.save();
+    return res.json(restaurant.settings);
+  } catch (error) {
+    next(error);
+  }
+});
+
 // @route   PUT /api/admin/website
 // @desc    Update website branding/content (global + branch-specific parts)
 // @access  Restaurant Admin / Super Admin
