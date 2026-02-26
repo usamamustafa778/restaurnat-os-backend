@@ -178,11 +178,10 @@ router.post('/register-restaurant', async (req, res, next) => {
       return res.status(400).json({ message: 'Email already registered' });
     }
 
-    // Create the restaurant with 15-day free trial
-    const trialDays = 15;
+    // Create the restaurant with a 3-month free trial
     const freeTrialStartDate = new Date();
     const freeTrialEndDate = new Date(freeTrialStartDate);
-    freeTrialEndDate.setDate(freeTrialEndDate.getDate() + trialDays);
+    freeTrialEndDate.setMonth(freeTrialEndDate.getMonth() + 3);
 
     const restaurant = await Restaurant.create({
       website: {

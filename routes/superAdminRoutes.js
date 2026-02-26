@@ -46,10 +46,10 @@ router.post('/restaurants', async (req, res, next) => {
       return res.status(400).json({ message: 'Admin email already in use' });
     }
 
-    // Default 15-day free trial for new restaurants
+    // Default 3-month free trial for new restaurants
     const now = new Date();
     const defaultTrialEnd = new Date(now);
-    defaultTrialEnd.setDate(defaultTrialEnd.getDate() + 15);
+    defaultTrialEnd.setMonth(defaultTrialEnd.getMonth() + 3);
 
     const restaurant = await Restaurant.create({
       website: {
@@ -235,7 +235,7 @@ router.get('/branches', async (req, res, next) => {
 router.patch('/restaurants/:id/subscription', async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { plan, status, trialEndsAt, expiresAt } = req.body;
+    const { plan, status, trialEndsAt, expiresAt, durationMonths } = req.body;
 
     const restaurant = await Restaurant.findById(id);
     if (!restaurant) {
@@ -247,12 +247,46 @@ router.patch('/restaurants/:id/subscription', async (req, res, next) => {
     }
 
     if (plan) restaurant.subscription.plan = plan;
-    if (status) restaurant.subscription.status = status;
-    if (trialEndsAt !== undefined) {
-      restaurant.subscription.trialEndsAt = trialEndsAt ? new Date(trialEndsAt) : undefined;
-    }
-    if (expiresAt !== undefined) {
-      restaurant.subscription.expiresAt = expiresAt ? new Date(expiresAt) : undefined;
+
+    const now = new Date();
+
+    if (status === 'TRIAL') {
+      // Standardize trial to 3 months from now
+      const trialStart = now;
+      const trialEnd = new Date(trialStart);
+      trialEnd.setMonth(trialEnd.getMonth() + 3);
+
+      restaurant.subscription.status = 'TRIAL';
+      restaurant.subscription.trialStartsAt = trialStart;
+      restaurant.subscription.trialEndsAt = trialEnd;
+      restaurant.subscription.freeTrialStartDate = trialStart;
+      restaurant.subscription.freeTrialEndDate = trialEnd;
+      // Clear paid subscription dates when resetting to trial
+      restaurant.subscription.subscriptionStartDate = undefined;
+      restaurant.subscription.subscriptionEndDate = undefined;
+      restaurant.subscription.expiresAt = trialEnd;
+      restaurant.readonly = false;
+    } else if (status === 'ACTIVE') {
+      // Activate for a fixed duration in months (1,3,6,12)
+      let months = Number(durationMonths) || 1;
+      if (![1, 3, 6, 12].includes(months)) months = 1;
+      const start = now;
+      const end = new Date(start);
+      end.setMonth(end.getMonth() + months);
+
+      restaurant.subscription.status = 'ACTIVE';
+      restaurant.subscription.subscriptionStartDate = start;
+      restaurant.subscription.subscriptionEndDate = end;
+      restaurant.subscription.expiresAt = end;
+      restaurant.readonly = false;
+    } else {
+      if (status) restaurant.subscription.status = status;
+      if (trialEndsAt !== undefined) {
+        restaurant.subscription.trialEndsAt = trialEndsAt ? new Date(trialEndsAt) : undefined;
+      }
+      if (expiresAt !== undefined) {
+        restaurant.subscription.expiresAt = expiresAt ? new Date(expiresAt) : undefined;
+      }
     }
 
     await restaurant.save();
