@@ -7,7 +7,7 @@ require('dotenv').config();
 const connectDB = require('../config/db');
 const User = require('../models/User');
 
-const email = process.env.FIX_SUPER_ADMIN_EMAIL || 'superadmin@restaurantos.local';
+const email = process.env.FIX_SUPER_ADMIN_EMAIL || 'abdulmananmalik046@gmail.com';
 
 async function main() {
   await connectDB(process.env.MONGO_URI);

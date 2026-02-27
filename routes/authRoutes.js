@@ -6,6 +6,7 @@ const UserBranch = require('../models/UserBranch');
 const generateToken = require('../utils/generateToken');
 const generateRefreshToken = require('../utils/generateRefreshToken');
 const { getBranchContext } = require('../middleware/authMiddleware');
+const { sendEmail, sendOtpEmail } = require('../utils/email');
 const jwt = require('jsonwebtoken');
 
 const router = express.Router();
@@ -53,15 +54,24 @@ router.post('/register', async (req, res, next) => {
       allowedBranchIds = branchCtx.allowedBranchIds;
     }
 
-    const token = generateToken(user, restaurant?.website?.subdomain || null);
-    const refreshToken = generateRefreshToken(user);
+    // Generate email verification OTP
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    user.emailVerificationOtp = otp;
+    user.emailVerificationOtpExpires = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+    user.emailVerified = false;
+    await user.save();
+
+    // Send verification email (best-effort), using same OTP logic as svift-backend
+    const { sent, error: emailError } = await sendOtpEmail(user.email, otp, 'Signup');
+    if (!sent) {
+      console.warn('Verification email (register) not sent:', emailError || 'unknown error');
+    }
 
     res.status(201).json({
-      token,
-      refreshToken,
+      message: 'User registered. Verification code sent to email.',
+      pendingVerification: true,
       user: {
         id: user._id,
-        name: user.name,
         email: user.email,
         role: user.role,
         restaurant: user.restaurant,
@@ -93,6 +103,23 @@ router.post('/login', async (req, res, next) => {
     const isMatch = await user.matchPassword(password);
     if (!isMatch) {
       return res.status(401).json({ message: 'Invalid credentials' });
+    }
+
+    if (!user.emailVerified) {
+      // Re-send verification OTP on login attempt
+      const otp = Math.floor(100000 + Math.random() * 900000).toString();
+      user.emailVerificationOtp = otp;
+      user.emailVerificationOtpExpires = new Date(Date.now() + 10 * 60 * 1000);
+      await user.save();
+
+      const { sent, error: emailError } = await sendOtpEmail(user.email, otp, 'Login');
+      if (!sent) {
+        console.warn('Verification email (login) not sent:', emailError || 'unknown error');
+      }
+
+      return res
+        .status(403)
+        .json({ message: 'EMAIL_NOT_VERIFIED', pendingVerification: true });
     }
 
     // Resolve restaurant to expose tenant slug (subdomain) for dashboard routing
@@ -240,13 +267,26 @@ router.post('/register-restaurant', async (req, res, next) => {
       restaurant._id
     );
 
-    // Generate token for immediate login
-    const token = generateToken(adminUser, restaurant.website.subdomain);
-    const refreshToken = generateRefreshToken(adminUser);
+    // Generate email verification OTP
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    adminUser.emailVerificationOtp = otp;
+    adminUser.emailVerificationOtpExpires = new Date(Date.now() + 10 * 60 * 1000);
+    adminUser.emailVerified = false;
+    await adminUser.save();
+
+    try {
+      await sendEmail({
+        to: adminUser.email,
+        subject: 'Verify your Eats Desk account',
+        text: `Your verification code is ${otp}. It will expire in 10 minutes.`,
+      });
+    } catch (e) {
+      console.error('Failed to send verification email for restaurant signup:', e.message);
+    }
 
     res.status(201).json({
-      token,
-      refreshToken,
+      message: 'Restaurant registered. Verification code sent to owner email.',
+      pendingVerification: true,
       user: {
         id: adminUser._id,
         name: adminUser.name,
@@ -275,6 +315,138 @@ router.post('/register-restaurant', async (req, res, next) => {
     if (error && error.code === 11000 && error.keyValue && error.keyValue['website.subdomain']) {
       return res.status(400).json({ message: 'Subdomain already taken' });
     }
+    next(error);
+  }
+});
+
+// @route   POST /api/auth/verify-email
+// @desc    Verify email with OTP and return tokens
+// @access  Public
+router.post('/verify-email', async (req, res, next) => {
+  try {
+    const { email, otp } = req.body;
+    if (!email || !otp) {
+      return res.status(400).json({ message: 'Email and code are required' });
+    }
+
+    const user = await User.findOne({ email: email.toLowerCase().trim() });
+    if (!user) {
+      return res.status(400).json({ message: 'Invalid email or code' });
+    }
+
+    if (
+      !user.emailVerificationOtp ||
+      !user.emailVerificationOtpExpires ||
+      user.emailVerificationOtp !== otp ||
+      user.emailVerificationOtpExpires < new Date()
+    ) {
+      return res.status(400).json({ message: 'Invalid or expired verification code' });
+    }
+
+    user.emailVerified = true;
+    user.emailVerificationOtp = undefined;
+    user.emailVerificationOtpExpires = undefined;
+    await user.save();
+
+    // Issue tokens like login
+    let restaurantSlug = null;
+    let defaultBranchId = null;
+    let allowedBranchIds = [];
+    if (user.restaurant) {
+      const restaurant = await Restaurant.findById(user.restaurant);
+      if (restaurant?.website?.subdomain) {
+        restaurantSlug = restaurant.website.subdomain;
+      }
+      const branchCtx = await getBranchContext(
+        { id: user._id.toString(), role: user.role },
+        user.restaurant,
+      );
+      defaultBranchId = branchCtx.defaultBranchId;
+      allowedBranchIds = branchCtx.allowedBranchIds;
+    }
+
+    const token = generateToken(user, restaurantSlug);
+    const refreshToken = generateRefreshToken(user);
+
+    res.json({
+      token,
+      refreshToken,
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        restaurant: user.restaurant,
+        restaurantSlug,
+        defaultBranchId,
+        allowedBranchIds,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @route   POST /api/auth/request-password-reset
+// @desc    Send OTP to email for password reset
+// @access  Public
+router.post('/request-password-reset', async (req, res, next) => {
+  try {
+    const { email } = req.body;
+    if (!email) {
+      return res.status(400).json({ message: 'Email is required' });
+    }
+    const user = await User.findOne({ email: email.toLowerCase().trim() });
+    if (!user) {
+      // Do not leak that email does not exist
+      return res.json({ message: 'If this email is registered, a reset code has been sent.' });
+    }
+
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    user.resetPasswordOtp = otp;
+    user.resetPasswordOtpExpires = new Date(Date.now() + 10 * 60 * 1000);
+    await user.save();
+
+    const { sent, error: emailError } = await sendOtpEmail(user.email, otp, 'Password reset');
+    if (!sent) {
+      console.warn('Password reset email not sent:', emailError || 'unknown error');
+      console.log(`Fallback password reset OTP for ${user.email}:`, otp);
+    }
+
+    res.json({ message: 'If this email is registered, a reset code has been sent.' });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @route   POST /api/auth/reset-password
+// @desc    Reset password using email + OTP
+// @access  Public
+router.post('/reset-password', async (req, res, next) => {
+  try {
+    const { email, otp, newPassword } = req.body;
+    if (!email || !otp || !newPassword) {
+      return res.status(400).json({ message: 'Email, code, and new password are required' });
+    }
+
+    const user = await User.findOne({ email: email.toLowerCase().trim() });
+    if (
+      !user ||
+      !user.resetPasswordOtp ||
+      !user.resetPasswordOtpExpires ||
+      user.resetPasswordOtp !== otp ||
+      user.resetPasswordOtpExpires < new Date()
+    ) {
+      return res.status(400).json({ message: 'Invalid or expired reset code' });
+    }
+
+    user.password = newPassword;
+    user.resetPasswordOtp = undefined;
+    user.resetPasswordOtpExpires = undefined;
+    await user.save();
+
+    res.json({ message: 'Password reset successful. You can now log in with your new password.' });
+  } catch (error) {
     next(error);
   }
 });

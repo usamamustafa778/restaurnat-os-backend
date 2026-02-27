@@ -44,6 +44,22 @@ const userSchema = new mongoose.Schema(
       ref: 'Restaurant',
       // super_admin may not belong to any single restaurant
     },
+    emailVerified: {
+      type: Boolean,
+      default: false,
+    },
+    emailVerificationOtp: {
+      type: String,
+    },
+    emailVerificationOtpExpires: {
+      type: Date,
+    },
+    resetPasswordOtp: {
+      type: String,
+    },
+    resetPasswordOtpExpires: {
+      type: Date,
+    },
   },
   {
     timestamps: true,

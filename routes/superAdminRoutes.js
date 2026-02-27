@@ -300,6 +300,79 @@ router.patch('/restaurants/:id/subscription', async (req, res, next) => {
   }
 });
 
+// @route   GET /api/super/users
+// @desc    List all users for super admin
+// @access  Super Admin
+router.get('/users', async (req, res, next) => {
+  try {
+    const users = await User.find({}).sort({ createdAt: -1 }).lean();
+
+    res.json(
+      users.map((u) => ({
+        id: u._id,
+        name: u.name,
+        email: u.email,
+        role: u.role,
+        restaurantId: u.restaurant || null,
+        createdAt: u.createdAt,
+      }))
+    );
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @route   POST /api/super/users
+// @desc    Create a new user (including additional super_admins)
+// @access  Super Admin
+router.post('/users', async (req, res, next) => {
+  try {
+    const { name, email, password, role } = req.body || {};
+
+    if (!name || !email || !password || !role) {
+      return res.status(400).json({ message: 'Name, email, password and role are required' });
+    }
+
+    const existing = await User.findOne({ email: email.toLowerCase().trim() });
+    if (existing) {
+      return res.status(400).json({ message: 'A user with this email already exists' });
+    }
+
+    const allowedRoles = [
+      'super_admin',
+      'restaurant_admin',
+      'staff',
+      'admin',
+      'product_manager',
+      'cashier',
+      'manager',
+      'kitchen_staff',
+      'order_taker',
+    ];
+    if (!allowedRoles.includes(role)) {
+      return res.status(400).json({ message: 'Invalid role' });
+    }
+
+    const user = await User.create({
+      name,
+      email: email.toLowerCase().trim(),
+      password,
+      role,
+      emailVerified: true,
+    });
+
+    res.status(201).json({
+      id: user._id,
+      name: user.name,
+      email: user.email,
+      role: user.role,
+      createdAt: user.createdAt,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // @route   GET /api/super/leads
 // @desc    List all contact/lead submissions
 // @access  Super Admin
