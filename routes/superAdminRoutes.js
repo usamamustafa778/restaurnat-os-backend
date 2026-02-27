@@ -147,7 +147,7 @@ router.get('/restaurants/deleted', async (req, res, next) => {
 });
 
 // @route   DELETE /api/super/restaurants/:id
-// @desc    Soft-delete restaurant (recoverable within 48 hours)
+// @desc    Soft-delete restaurant (recoverable within 48 hours) and remove related users
 // @access  Super Admin
 router.delete('/restaurants/:id', async (req, res, next) => {
   try {
@@ -161,6 +161,10 @@ router.delete('/restaurants/:id', async (req, res, next) => {
     restaurant.isDeleted = true;
     restaurant.deletedAt = new Date();
     await restaurant.save();
+
+    // Remove all users linked to this restaurant (including restaurant_admin)
+    await User.deleteMany({ restaurant: restaurant._id });
+
     res.status(204).send();
   } catch (error) {
     next(error);
@@ -200,7 +204,7 @@ router.post('/restaurants/:id/restore', async (req, res, next) => {
 });
 
 // @route   DELETE /api/super/restaurants/:id/permanent
-// @desc    Permanently delete a restaurant (cannot be undone)
+// @desc    Permanently delete a restaurant and related users (cannot be undone)
 // @access  Super Admin
 router.delete('/restaurants/:id/permanent', async (req, res, next) => {
   try {
@@ -210,6 +214,7 @@ router.delete('/restaurants/:id/permanent', async (req, res, next) => {
     }
 
     await Restaurant.deleteOne({ _id: restaurant._id });
+    await User.deleteMany({ restaurant: restaurant._id });
     res.status(204).send();
   } catch (error) {
     next(error);
@@ -498,6 +503,23 @@ router.post('/users', async (req, res, next) => {
       role: user.role,
       createdAt: user.createdAt,
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @route   DELETE /api/super/users/:id
+// @desc    Permanently delete a user (cannot be undone)
+// @access  Super Admin
+router.delete('/users/:id', async (req, res, next) => {
+  try {
+    const user = await User.findById(req.params.id);
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    await User.deleteOne({ _id: user._id });
+    res.status(204).send();
   } catch (error) {
     next(error);
   }
