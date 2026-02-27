@@ -199,8 +199,103 @@ router.post('/restaurants/:id/restore', async (req, res, next) => {
   }
 });
 
+// @route   DELETE /api/super/restaurants/:id/permanent
+// @desc    Permanently delete a restaurant (cannot be undone)
+// @access  Super Admin
+router.delete('/restaurants/:id/permanent', async (req, res, next) => {
+  try {
+    const restaurant = await Restaurant.findById(req.params.id);
+    if (!restaurant) {
+      return res.status(404).json({ message: 'Restaurant not found' });
+    }
+
+    await Restaurant.deleteOne({ _id: restaurant._id });
+    res.status(204).send();
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @route   DELETE /api/super/branches/:id
+// @desc    Soft-delete branch (recoverable within 48 hours)
+// @access  Super Admin
+router.delete('/branches/:id', async (req, res, next) => {
+  try {
+    const branch = await Branch.findById(req.params.id);
+    if (!branch) {
+      return res.status(404).json({ message: 'Branch not found' });
+    }
+    if (branch.isDeleted) {
+      return res.status(400).json({ message: 'Branch is already deleted' });
+    }
+    branch.status = 'inactive';
+    branch.isDeleted = true;
+    branch.deletedAt = new Date();
+    await branch.save();
+    res.status(204).send();
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @route   POST /api/super/branches/:id/restore
+// @desc    Restore a soft-deleted branch within 48 hours
+// @access  Super Admin
+router.post('/branches/:id/restore', async (req, res, next) => {
+  try {
+    const branch = await Branch.findById(req.params.id);
+    if (!branch) {
+      return res.status(404).json({ message: 'Branch not found' });
+    }
+    if (!branch.isDeleted || !branch.deletedAt) {
+      return res.status(400).json({ message: 'Branch is not deleted' });
+    }
+    const now = Date.now();
+    const deletedAtMs = branch.deletedAt.getTime();
+    const diffHours = (now - deletedAtMs) / (1000 * 60 * 60);
+    if (diffHours > 48) {
+      return res
+        .status(400)
+        .json({ message: 'Restore window (48 hours) has expired for this branch' });
+    }
+    branch.isDeleted = false;
+    branch.deletedAt = null;
+    branch.status = 'active';
+    await branch.save();
+    res.json({
+      id: branch._id.toString(),
+      name: branch.name,
+      code: branch.code || '',
+      address: branch.address || '',
+      contactPhone: branch.contactPhone || '',
+      contactEmail: branch.contactEmail || '',
+      status: branch.status || 'active',
+      sortOrder: branch.sortOrder ?? 0,
+      restaurantId: branch.restaurant?.toString() || null,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @route   DELETE /api/super/branches/:id/permanent
+// @desc    Permanently delete a branch (cannot be undone)
+// @access  Super Admin
+router.delete('/branches/:id/permanent', async (req, res, next) => {
+  try {
+    const branch = await Branch.findById(req.params.id);
+    if (!branch) {
+      return res.status(404).json({ message: 'Branch not found' });
+    }
+    await Branch.deleteOne({ _id: branch._id });
+    res.status(204).send();
+  } catch (error) {
+    next(error);
+  }
+});
+
 // @route   GET /api/super/branches
-// @desc    List all branches of all restaurants (super_admin only)
+// @desc    List all non-deleted branches of all restaurants (super_admin only)
 // @access  Super Admin
 router.get('/branches', async (req, res, next) => {
   try {
@@ -221,6 +316,41 @@ router.get('/branches', async (req, res, next) => {
       restaurantId: b.restaurant?._id?.toString(),
       restaurantName: b.restaurant?.website?.name || '—',
       subdomain: b.restaurant?.website?.subdomain || '—',
+    }));
+
+    res.json({ branches: list });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @route   GET /api/super/branches/deleted
+// @desc    List soft-deleted branches from the last 48 hours across all restaurants
+// @access  Super Admin
+router.get('/branches/deleted', async (req, res, next) => {
+  try {
+    const cutoff = new Date(Date.now() - 48 * 60 * 60 * 1000);
+    const branches = await Branch.find({
+      isDeleted: true,
+      deletedAt: { $gte: cutoff },
+    })
+      .populate('restaurant', 'website.subdomain website.name')
+      .sort({ deletedAt: -1 })
+      .lean();
+
+    const list = branches.map((b) => ({
+      id: b._id.toString(),
+      name: b.name,
+      code: b.code || '',
+      address: b.address || '',
+      contactPhone: b.contactPhone || '',
+      contactEmail: b.contactEmail || '',
+      status: b.status || 'inactive',
+      sortOrder: b.sortOrder ?? 0,
+      restaurantId: b.restaurant?._id?.toString(),
+      restaurantName: b.restaurant?.website?.name || '—',
+      subdomain: b.restaurant?.website?.subdomain || '—',
+      deletedAt: b.deletedAt || null,
     }));
 
     res.json({ branches: list });
