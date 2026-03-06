@@ -566,18 +566,14 @@ router.get('/menu', async (req, res, next) => {
       return result;
     });
 
-    // Filter out items not available at this branch
-    let filteredItems = mappedItems;
-    if (branchId) {
-      // When viewing a specific branch, only show items that are available at that branch
-      // This means:
-      // 1. Items with availableAtAllBranches=true (unless overridden to false)
-      // 2. Items with availableAtAllBranches=false AND a branch override with available=true
-      filteredItems = mappedItems.filter(item => {
-        // If branchAvailable is false, don't show it
-        return item.branchAvailable !== false;
-      });
-    }
+    // Admin menu: show ALL items (including unavailable) so staff can re-enable them.
+    // Attach a finalAvailable field so the frontend can display the effective status.
+    const filteredItems = mappedItems.map(item => {
+      if (branchId) {
+        return { ...item, finalAvailable: item.branchAvailable };
+      }
+      return { ...item, finalAvailable: item.available };
+    });
 
     res.json({
       categories: categories.map(mapCategory),
