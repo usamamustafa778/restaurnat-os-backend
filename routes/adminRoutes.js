@@ -2050,7 +2050,11 @@ router.get('/reports/sales', async (req, res, next) => {
     const fromDate = from ? new Date(from) : new Date(new Date().setHours(0, 0, 0, 0));
     const toDate = to ? new Date(to) : new Date(new Date().setHours(23, 59, 59, 999));
 
-    const orderFilter = { restaurant: restaurantId, status: 'DELIVERED', createdAt: { $gte: fromDate, $lte: toDate } };
+    const orderFilter = {
+      restaurant: restaurantId,
+      status: { $in: ['DELIVERED', 'COMPLETED'] },
+      createdAt: { $gte: fromDate, $lte: toDate },
+    };
     if (branchId) orderFilter.branch = branchId;
     const orders = await Order.find(orderFilter);
 
