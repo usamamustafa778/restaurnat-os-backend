@@ -1885,6 +1885,7 @@ router.put('/settings', async (req, res, next) => {
       allowOrderWhenOutOfStock,
       restaurantLogoUrl,
       restaurantLogoHeightPx,
+      billFooterMessage,
     } = req.body;
 
     if (typeof allowOrderWhenOutOfStock === 'boolean') {
@@ -1897,6 +1898,10 @@ router.put('/settings', async (req, res, next) => {
 
     if (typeof restaurantLogoHeightPx === 'number') {
       restaurant.settings.restaurantLogoHeightPx = restaurantLogoHeightPx;
+    }
+
+    if (typeof billFooterMessage === 'string') {
+      restaurant.settings.billFooterMessage = billFooterMessage;
     }
 
     await restaurant.save();

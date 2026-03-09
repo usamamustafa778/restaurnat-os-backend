@@ -133,6 +133,14 @@ const restaurantSchema = new mongoose.Schema(
       restaurantLogoUrl: {
         type: String,
       },
+      restaurantLogoHeightPx: {
+        type: Number,
+        default: 100,
+      },
+      billFooterMessage: {
+        type: String,
+        default: 'Thank you for your order!',
+      },
     },
   },
   {
