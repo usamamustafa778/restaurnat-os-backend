@@ -1904,6 +1904,8 @@ router.put('/settings', async (req, res, next) => {
       restaurant.settings.billFooterMessage = billFooterMessage;
     }
 
+    // Mongoose won't detect nested-object mutations without this
+    restaurant.markModified('settings');
     await restaurant.save();
     return res.json(restaurant.settings);
   } catch (error) {
