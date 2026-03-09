@@ -650,7 +650,11 @@ router.put('/orders/:id', async (req, res, next) => {
     const { items, discountAmount, customerName, customerPhone, deliveryAddress, orderType, tableName } = req.body;
     const restaurantId = getRestaurantIdForRequest(req);
 
-    let order = await Order.findOne({ _id: id, restaurant: restaurantId });
+    let order = null;
+    // If id looks like a Mongo ObjectId, search by _id; otherwise skip to orderNumber lookup
+    if (id && /^[0-9a-fA-F]{24}$/.test(id)) {
+      order = await Order.findOne({ _id: id, restaurant: restaurantId });
+    }
     if (!order) {
       order = await Order.findOne({ orderNumber: id, restaurant: restaurantId });
     }
@@ -1880,6 +1884,7 @@ router.put('/settings', async (req, res, next) => {
     const {
       allowOrderWhenOutOfStock,
       restaurantLogoUrl,
+      restaurantLogoHeightPx,
     } = req.body;
 
     if (typeof allowOrderWhenOutOfStock === 'boolean') {
@@ -1888,6 +1893,10 @@ router.put('/settings', async (req, res, next) => {
 
     if (restaurantLogoUrl !== undefined) {
       restaurant.settings.restaurantLogoUrl = restaurantLogoUrl;
+    }
+
+    if (typeof restaurantLogoHeightPx === 'number') {
+      restaurant.settings.restaurantLogoHeightPx = restaurantLogoHeightPx;
     }
 
     await restaurant.save();
