@@ -41,6 +41,7 @@ router.post('/register', async (req, res, next) => {
       password,
       role: role || 'staff',
       restaurant: restaurant ? restaurant._id : undefined,
+      emailVerified: true,
     });
 
     let defaultBranchId = null;
@@ -54,22 +55,9 @@ router.post('/register', async (req, res, next) => {
       allowedBranchIds = branchCtx.allowedBranchIds;
     }
 
-    // Generate email verification OTP
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    user.emailVerificationOtp = otp;
-    user.emailVerificationOtpExpires = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
-    user.emailVerified = false;
-    await user.save();
-
-    // Send verification email (best-effort), using same OTP logic as svift-backend
-    const { sent, error: emailError } = await sendOtpEmail(user.email, otp, 'Signup');
-    if (!sent) {
-      console.warn('Verification email (register) not sent:', emailError || 'unknown error');
-    }
-
     res.status(201).json({
-      message: 'User registered. Verification code sent to email.',
-      pendingVerification: true,
+      message: 'User registered successfully.',
+      pendingVerification: false,
       user: {
         id: user._id,
         email: user.email,
@@ -106,20 +94,10 @@ router.post('/login', async (req, res, next) => {
     }
 
     if (!user.emailVerified) {
-      // Re-send verification OTP on login attempt
-      const otp = Math.floor(100000 + Math.random() * 900000).toString();
-      user.emailVerificationOtp = otp;
-      user.emailVerificationOtpExpires = new Date(Date.now() + 10 * 60 * 1000);
+      user.emailVerified = true;
+      user.emailVerificationOtp = undefined;
+      user.emailVerificationOtpExpires = undefined;
       await user.save();
-
-      const { sent, error: emailError } = await sendOtpEmail(user.email, otp, 'Login');
-      if (!sent) {
-        console.warn('Verification email (login) not sent:', emailError || 'unknown error');
-      }
-
-      return res
-        .status(403)
-        .json({ message: 'EMAIL_NOT_VERIFIED', pendingVerification: true });
     }
 
     // Resolve restaurant to expose tenant slug (subdomain) for dashboard routing
@@ -260,29 +238,13 @@ router.post('/register-restaurant', async (req, res, next) => {
       password,
       role: 'restaurant_admin',
       restaurant: restaurant._id,
+      emailVerified: true,
     });
 
     const branchCtx = await getBranchContext(
       { id: adminUser._id.toString(), role: adminUser.role },
       restaurant._id
     );
-
-    // Generate email verification OTP
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    adminUser.emailVerificationOtp = otp;
-    adminUser.emailVerificationOtpExpires = new Date(Date.now() + 10 * 60 * 1000);
-    adminUser.emailVerified = false;
-    await adminUser.save();
-
-    try {
-      await sendEmail({
-        to: adminUser.email,
-        subject: 'Verify your Eats Desk account',
-        text: `Your verification code is ${otp}. It will expire in 10 minutes.`,
-      });
-    } catch (e) {
-      console.error('Failed to send verification email for restaurant signup:', e.message);
-    }
 
     res.status(201).json({
       message: 'Restaurant registered. Verification code sent to owner email.',
