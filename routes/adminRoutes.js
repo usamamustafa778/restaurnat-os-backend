@@ -2609,6 +2609,10 @@ router.put('/users/:id', async (req, res, next) => {
       return res.status(404).json({ message: 'User not found' });
     }
 
+    if (user.role === 'restaurant_admin') {
+      return res.status(403).json({ message: 'Owner user cannot be edited' });
+    }
+
     if (name !== undefined) user.name = name.trim();
     if (email !== undefined) user.email = email.toLowerCase().trim();
     if (role !== undefined) {
@@ -2670,6 +2674,10 @@ router.delete('/users/:id', async (req, res, next) => {
     const user = await User.findOne({ _id: id, restaurant: restaurantId });
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
+    }
+
+    if (user.role === 'restaurant_admin') {
+      return res.status(403).json({ message: 'Owner user cannot be deleted' });
     }
 
     const requesterId = req.user._id?.toString?.() ?? req.user.id;
