@@ -5,12 +5,10 @@ let transporter = null;
 function getTransporter() {
   if (transporter) return transporter;
 
-  const {
-    SMTP_HOST,
-    SMTP_PORT,
-    SMTP_USER,
-    SMTP_PASS,
-  } = process.env;
+  const SMTP_HOST = process.env.EMAIL_HOST || 'smtp.gmail.com';
+  const SMTP_PORT = process.env.EMAIL_PORT || '587';
+  const SMTP_USER = process.env.EMAIL_USER;
+  const SMTP_PASS = process.env.EMAIL_PASS;
 
   if (!SMTP_HOST || !SMTP_PORT || !SMTP_USER || !SMTP_PASS) {
     console.warn(
@@ -60,8 +58,11 @@ async function sendEmail({ to, subject, text, html }) {
 async function sendOtpEmail(toEmail, code, label) {
   const tx = getTransporter();
 
-  if (!process.env.SMTP_USER || !process.env.SMTP_PASS || !tx) {
-    console.warn('[email] SMTP not configured (SMTP_USER/SMTP_PASS). OTP logged only:', code);
+  const smtpUser = process.env.EMAIL_USER;
+  const smtpPass = process.env.EMAIL_PASS;
+
+  if (!smtpUser || !smtpPass || !tx) {
+    console.warn('[email] SMTP not configured (user/pass). OTP logged only:', code);
     return { sent: false, error: 'SMTP not configured' };
   }
 

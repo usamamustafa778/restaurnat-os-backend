@@ -100,6 +100,10 @@ router.post('/login', async (req, res, next) => {
       return res.status(401).json({ message: 'Email not found. Please sign up first.' });
     }
 
+    if (!user.password) {
+      return res.status(401).json({ message: 'Invalid credentials' });
+    }
+
     const isMatch = await user.matchPassword(password);
     if (!isMatch) {
       return res.status(401).json({ message: 'Invalid credentials' });
