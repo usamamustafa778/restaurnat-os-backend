@@ -7,9 +7,26 @@ const Order = require('../models/Order');
 const Branch = require('../models/Branch');
 const Table = require('../models/Table');
 const PosDraft = require('../models/PosDraft');
+const DaySession = require('../models/DaySession');
 const { protect, requireRole, requireRestaurant, checkSubscriptionStatus } = require('../middleware/authMiddleware');
 const { generateOrderNumber } = require('../utils/orderNumber');
 const { getOrderRooms } = require('../utils/socketRooms');
+
+// Returns existing OPEN session or auto-creates a new one (no manual start needed)
+async function getOrCreateCurrentSession(restaurantId, branch, userId) {
+  const branchId = branch ? branch._id : null;
+  let session = await DaySession.findOne({ restaurant: restaurantId, branch: branchId, status: 'OPEN' });
+  if (!session) {
+    session = await DaySession.create({
+      restaurant: restaurantId,
+      branch: branchId,
+      status: 'OPEN',
+      startAt: new Date(),
+      openedBy: userId || null,
+    });
+  }
+  return session;
+}
 
 const router = express.Router();
 
@@ -243,9 +260,12 @@ router.post('/orders', async (req, res, next) => {
       }
     }
 
+    const session = await getOrCreateCurrentSession(req.restaurant._id, branch, req.user.id);
+
     const order = await Order.create({
       restaurant: req.restaurant._id,
       branch: branch ? branch._id : undefined,
+      daySession: session._id,
       table: tableId || undefined,
       tableNumber: (tableNumber || '').trim(),
       tableName: tableNameTrimmed,
@@ -973,6 +993,311 @@ router.delete('/transactions/:id', async (req, res, next) => {
     });
   } catch (error) {
     next(error);
+  }
+});
+
+// ============================================
+// DAY SESSION ENDPOINTS
+// ============================================
+
+// @route   GET /api/pos/day-session/current
+// @desc    Get the current OPEN day session for this restaurant/branch
+// @access  Staff / Cashier / Admin
+router.get('/day-session/current', async (req, res, next) => {
+  try {
+    const restaurantId = req.restaurant._id;
+    const branchId = req.headers['x-branch-id'] || req.query.branchId || null;
+
+    const session = await DaySession.findOne({
+      restaurant: restaurantId,
+      branch: branchId || null,
+      status: 'OPEN',
+    })
+      .populate('openedBy', 'name email')
+      .lean();
+
+    if (!session) {
+      return res.json({ session: null });
+    }
+
+    return res.json({
+      session: {
+        id: session._id.toString(),
+        status: session.status,
+        startAt: session.startAt,
+        endAt: session.endAt,
+        sessionKey: session.sessionKey || '',
+        openedBy: session.openedBy ? { id: session.openedBy._id?.toString(), name: session.openedBy.name } : null,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// @route   POST /api/pos/day-session/end
+// @desc    End the current OPEN day session; next order auto-starts a new one
+// @access  Staff / Cashier / Admin
+router.post('/day-session/end', async (req, res, next) => {
+  try {
+    const restaurantId = req.restaurant._id;
+    const branchId = req.body.branchId || req.headers['x-branch-id'] || null;
+
+    const session = await DaySession.findOne({
+      restaurant: restaurantId,
+      branch: branchId || null,
+      status: 'OPEN',
+    });
+
+    if (!session) {
+      return res.status(400).json({ message: 'No open day session found' });
+    }
+
+    const now = new Date();
+    session.status = 'CLOSED';
+    session.endAt = now;
+    session.closedBy = req.user._id;
+
+    // Build human-readable key: "start - end"
+    const fmt = (d) =>
+      d.toLocaleString('en-PK', {
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false,
+      });
+    session.sessionKey = `${fmt(session.startAt)} - ${fmt(session.endAt)}`;
+
+    await session.save();
+
+    return res.json({
+      message: 'Day session ended successfully',
+      session: {
+        id: session._id.toString(),
+        status: session.status,
+        startAt: session.startAt,
+        endAt: session.endAt,
+        sessionKey: session.sessionKey,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// @route   GET /api/pos/day-session/list
+// @desc    List all day sessions (history) for this restaurant/branch
+// @access  Staff / Cashier / Admin
+router.get('/day-session/list', async (req, res, next) => {
+  try {
+    const restaurantId = req.restaurant._id;
+    const branchId = req.headers['x-branch-id'] || req.query.branchId || null;
+    const limit = parseInt(req.query.limit) || 30;
+    const offset = parseInt(req.query.offset) || 0;
+
+    // When branchId is provided filter to that branch only;
+    // when null/omitted (All branches view) return sessions for all branches.
+    const filter = { restaurant: restaurantId };
+    if (branchId) filter.branch = branchId;
+
+    const [sessions, total] = await Promise.all([
+      DaySession.find(filter)
+        .sort({ startAt: -1 })
+        .limit(limit)
+        .skip(offset)
+        .populate('openedBy', 'name')
+        .populate('closedBy', 'name')
+        .populate('branch', 'name')
+        .lean(),
+      DaySession.countDocuments(filter),
+    ]);
+
+    const formatted = await Promise.all(
+      sessions.map(async (s) => {
+        const orderCount = await Order.countDocuments({ daySession: s._id });
+        const totalsAgg = await Order.aggregate([
+          { $match: { daySession: s._id, status: { $nin: ['CANCELLED'] } } },
+          { $group: { _id: null, totalSales: { $sum: '$total' }, totalOrders: { $sum: 1 } } },
+        ]);
+        const agg = totalsAgg[0] || { totalSales: 0, totalOrders: 0 };
+        return {
+          id: s._id.toString(),
+          status: s.status,
+          startAt: s.startAt,
+          endAt: s.endAt,
+          sessionKey: s.sessionKey || '',
+          branchName: s.branch ? s.branch.name : null,
+          openedBy: s.openedBy ? { id: s.openedBy._id?.toString(), name: s.openedBy.name } : null,
+          closedBy: s.closedBy ? { id: s.closedBy._id?.toString(), name: s.closedBy.name } : null,
+          orderCount,
+          totalSales: agg.totalSales,
+          totalOrders: agg.totalOrders,
+        };
+      })
+    );
+
+    return res.json({ sessions: formatted, total, limit, offset });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// @route   POST /api/pos/day-session/bulk-orders
+// @desc    Get aggregated orders + summary for multiple day sessions in one call
+// @access  Staff / Cashier / Admin
+router.post('/day-session/bulk-orders', async (req, res, next) => {
+  try {
+    const { sessionIds } = req.body;
+    const restaurantId = req.restaurant._id;
+
+    if (!Array.isArray(sessionIds) || sessionIds.length === 0) {
+      return res.status(400).json({ message: 'sessionIds array is required' });
+    }
+
+    const mongoose = require('mongoose');
+    const objectIds = sessionIds
+      .filter((id) => mongoose.Types.ObjectId.isValid(id))
+      .map((id) => new mongoose.Types.ObjectId(id));
+
+    if (objectIds.length === 0) {
+      return res.status(400).json({ message: 'No valid session IDs provided' });
+    }
+
+    // Verify all sessions belong to this restaurant
+    const sessions = await DaySession.find({
+      _id: { $in: objectIds },
+      restaurant: restaurantId,
+    }).lean();
+
+    if (sessions.length === 0) {
+      return res.status(404).json({ message: 'No sessions found' });
+    }
+
+    const validIds = sessions.map((s) => s._id);
+
+    const [orders, totalsAgg] = await Promise.all([
+      Order.find({ daySession: { $in: validIds }, restaurant: restaurantId })
+        .sort({ createdAt: -1 })
+        .populate('createdBy', 'name')
+        .lean(),
+
+      Order.aggregate([
+        {
+          $match: {
+            daySession: { $in: validIds },
+            status: { $nin: ['CANCELLED'] },
+          },
+        },
+        {
+          $group: {
+            _id: null,
+            totalSales: { $sum: '$total' },
+            totalOrders: { $sum: 1 },
+            totalDiscount: { $sum: '$discountAmount' },
+            totalProfit: { $sum: '$profit' },
+            cashSales: { $sum: { $cond: [{ $eq: ['$paymentMethod', 'CASH'] }, '$total', 0] } },
+            cardSales: { $sum: { $cond: [{ $eq: ['$paymentMethod', 'CARD'] }, '$total', 0] } },
+          },
+        },
+      ]),
+    ]);
+
+    const summary = totalsAgg[0] || {
+      totalSales: 0,
+      totalOrders: 0,
+      totalDiscount: 0,
+      totalProfit: 0,
+      cashSales: 0,
+      cardSales: 0,
+    };
+
+    return res.json({
+      summary,
+      orders: orders.map((o) => ({
+        id: o._id.toString(),
+        orderNumber: o.orderNumber,
+        orderType: o.orderType,
+        paymentMethod: o.paymentMethod,
+        status: o.status,
+        customerName: o.customerName,
+        subtotal: o.subtotal,
+        discountAmount: o.discountAmount,
+        total: o.total,
+        profit: o.profit,
+        createdAt: o.createdAt,
+        createdBy: o.createdBy
+          ? { id: o.createdBy._id?.toString(), name: o.createdBy.name }
+          : null,
+      })),
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// @route   GET /api/pos/day-session/:sessionId/orders
+// @desc    Get all orders for a specific day session
+// @access  Staff / Cashier / Admin
+router.get('/day-session/:sessionId/orders', async (req, res, next) => {
+  try {
+    const { sessionId } = req.params;
+    const restaurantId = req.restaurant._id;
+
+    const session = await DaySession.findOne({ _id: sessionId, restaurant: restaurantId });
+    if (!session) {
+      return res.status(404).json({ message: 'Day session not found' });
+    }
+
+    const orders = await Order.find({ daySession: sessionId, restaurant: restaurantId })
+      .sort({ createdAt: -1 })
+      .populate('createdBy', 'name')
+      .lean();
+
+    const totalsAgg = await Order.aggregate([
+      { $match: { daySession: session._id, status: { $nin: ['CANCELLED'] } } },
+      {
+        $group: {
+          _id: null,
+          totalSales: { $sum: '$total' },
+          totalOrders: { $sum: 1 },
+          totalDiscount: { $sum: '$discountAmount' },
+          totalProfit: { $sum: '$profit' },
+          cashSales: { $sum: { $cond: [{ $eq: ['$paymentMethod', 'CASH'] }, '$total', 0] } },
+          cardSales: { $sum: { $cond: [{ $eq: ['$paymentMethod', 'CARD'] }, '$total', 0] } },
+        },
+      },
+    ]);
+    const summary = totalsAgg[0] || { totalSales: 0, totalOrders: 0, totalDiscount: 0, totalProfit: 0, cashSales: 0, cardSales: 0 };
+
+    return res.json({
+      session: {
+        id: session._id.toString(),
+        status: session.status,
+        startAt: session.startAt,
+        endAt: session.endAt,
+        sessionKey: session.sessionKey || '',
+      },
+      summary,
+      orders: orders.map((o) => ({
+        id: o._id.toString(),
+        orderNumber: o.orderNumber,
+        orderType: o.orderType,
+        paymentMethod: o.paymentMethod,
+        status: o.status,
+        customerName: o.customerName,
+        subtotal: o.subtotal,
+        discountAmount: o.discountAmount,
+        total: o.total,
+        profit: o.profit,
+        createdAt: o.createdAt,
+        createdBy: o.createdBy ? { id: o.createdBy._id?.toString(), name: o.createdBy.name } : null,
+      })),
+    });
+  } catch (err) {
+    next(err);
   }
 });
 

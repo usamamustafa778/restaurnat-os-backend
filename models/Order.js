@@ -83,6 +83,12 @@ const orderSchema = new mongoose.Schema(
       type: String,
       default: '',
     },
+    daySession: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'DaySession',
+      default: null,
+      index: true,
+    },
     createdBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
