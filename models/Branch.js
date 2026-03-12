@@ -63,6 +63,12 @@ const branchSchema = new mongoose.Schema(
       type: Boolean,
       default: true,
     },
+    businessDayCutoffHour: {
+      type: Number,
+      default: 4,
+      min: 0,
+      max: 23,
+    },
     // Soft delete flags for safe recovery
     isDeleted: {
       type: Boolean,

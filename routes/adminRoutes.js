@@ -98,6 +98,7 @@ const mapBranch = (branch) => ({
   showTablePos: branch.showTablePos !== false,
   showWaiterPos: branch.showWaiterPos !== false,
   showCustomerPos: branch.showCustomerPos !== false,
+  businessDayCutoffHour: branch.businessDayCutoffHour ?? 4,
   createdAt: branch.createdAt?.toISOString?.(),
   updatedAt: branch.updatedAt?.toISOString?.(),
 });
@@ -178,7 +179,7 @@ router.post('/branches', async (req, res, next) => {
     if (req.user.role !== 'super_admin' && req.user.role !== 'restaurant_admin') {
       return res.status(403).json({ message: 'Only restaurant owner can create branches' });
     }
-    const { name, code, address, contactPhone, contactEmail, openingHours, status, sortOrder } = req.body;
+    const { name, code, address, contactPhone, contactEmail, openingHours, status, sortOrder, businessDayCutoffHour } = req.body;
     if (!name || !name.trim()) {
       return res.status(400).json({ message: 'Branch name is required' });
     }
@@ -193,7 +194,7 @@ router.post('/branches', async (req, res, next) => {
       finalCode = await generateUniqueBranchCode(restaurantId, name);
     }
 
-    const branch = await Branch.create({
+    const branchData = {
       restaurant: restaurantId,
       name: name.trim(),
       code: finalCode,
@@ -203,7 +204,12 @@ router.post('/branches', async (req, res, next) => {
       openingHours: openingHours || {},
       status: status || 'active',
       sortOrder: sortOrder ?? 0,
-    });
+    };
+    if (businessDayCutoffHour !== undefined) {
+      const h = Number(businessDayCutoffHour);
+      if (Number.isInteger(h) && h >= 0 && h <= 23) branchData.businessDayCutoffHour = h;
+    }
+    const branch = await Branch.create(branchData);
     res.status(201).json(mapBranch(branch));
   } catch (error) {
     next(error);
@@ -242,7 +248,7 @@ router.put('/branches/:id', async (req, res, next) => {
     if (req.user.role !== 'super_admin' && req.user.role !== 'restaurant_admin' && (!req.user.allowedBranchIds || !req.user.allowedBranchIds.includes(branch._id.toString()))) {
       return res.status(403).json({ message: 'Access denied to this branch' });
     }
-    const { name, code, address, contactPhone, contactEmail, openingHours, status, sortOrder, showTablePos, showWaiterPos, showCustomerPos } = req.body;
+    const { name, code, address, contactPhone, contactEmail, openingHours, status, sortOrder, showTablePos, showWaiterPos, showCustomerPos, businessDayCutoffHour } = req.body;
     if (name !== undefined) branch.name = name.trim();
     if (code !== undefined) {
       const trimmed = code ? code.trim() : null;
@@ -267,6 +273,10 @@ router.put('/branches/:id', async (req, res, next) => {
     if (showTablePos !== undefined) branch.showTablePos = !!showTablePos;
     if (showWaiterPos !== undefined) branch.showWaiterPos = !!showWaiterPos;
     if (showCustomerPos !== undefined) branch.showCustomerPos = !!showCustomerPos;
+    if (businessDayCutoffHour !== undefined) {
+      const h = Number(businessDayCutoffHour);
+      if (Number.isInteger(h) && h >= 0 && h <= 23) branch.businessDayCutoffHour = h;
+    }
     await branch.save();
     res.json(mapBranch(branch));
   } catch (error) {
@@ -2054,6 +2064,32 @@ function computeItemCost(menuItem, inventoryMap) {
   return cost;
 }
 
+/**
+ * Given a calendar date and a cutoff hour, return the business-day window.
+ * E.g. cutoff=4, date=2026-03-12 → { start: 2026-03-12T04:00, end: 2026-03-13T04:00 }
+ */
+function getBusinessDayRange(date, cutoffHour) {
+  const start = new Date(date);
+  start.setHours(cutoffHour, 0, 0, 0);
+  const end = new Date(start);
+  end.setDate(end.getDate() + 1);
+  return { start, end };
+}
+
+/**
+ * Return the start of the current business day based on the cutoff hour.
+ * Before the cutoff we're still in yesterday's business day.
+ */
+function getCurrentBusinessDayStart(cutoffHour) {
+  const now = new Date();
+  const start = new Date(now);
+  if (now.getHours() < cutoffHour) {
+    start.setDate(start.getDate() - 1);
+  }
+  start.setHours(cutoffHour, 0, 0, 0);
+  return start;
+}
+
 // @route   GET /api/admin/reports/sales
 // @desc    Get sales report for a date range
 // @access  Restaurant Admin / Super Admin
@@ -2062,9 +2098,19 @@ router.get('/reports/sales', async (req, res, next) => {
     const restaurantId = getRestaurantIdForRequest(req);
     const branchId = getBranchIdForRequest(req);
     const { from, to } = req.query;
+    const cutoff = req.branch?.businessDayCutoffHour ?? 0;
 
-    const fromDate = from ? new Date(from) : new Date(new Date().setHours(0, 0, 0, 0));
-    const toDate = to ? new Date(to) : new Date(new Date().setHours(23, 59, 59, 999));
+    let fromDate, toDate;
+    if (from) {
+      fromDate = new Date(from);
+    } else {
+      fromDate = getCurrentBusinessDayStart(cutoff);
+    }
+    if (to) {
+      toDate = new Date(to);
+    } else {
+      toDate = new Date();
+    }
 
     const orderFilter = {
       restaurant: restaurantId,
@@ -2192,13 +2238,20 @@ router.get('/reports/day', async (req, res, next) => {
     const restaurantId = getRestaurantIdForRequest(req);
     const branchId = getBranchIdForRequest(req);
     const { date } = req.query;
-    const reportDate = date ? new Date(date) : new Date();
-    const startOfDay = new Date(reportDate);
-    startOfDay.setHours(0, 0, 0, 0);
-    const endOfDay = new Date(reportDate);
-    endOfDay.setHours(23, 59, 59, 999);
+    const cutoff = req.branch?.businessDayCutoffHour ?? 0;
 
-    const orderFilter = { restaurant: restaurantId, createdAt: { $gte: startOfDay, $lte: endOfDay } };
+    let startOfDay, endOfDay;
+    if (date) {
+      const range = getBusinessDayRange(new Date(date), cutoff);
+      startOfDay = range.start;
+      endOfDay = range.end;
+    } else {
+      startOfDay = getCurrentBusinessDayStart(cutoff);
+      const range = getBusinessDayRange(startOfDay, cutoff);
+      endOfDay = range.end;
+    }
+
+    const orderFilter = { restaurant: restaurantId, createdAt: { $gte: startOfDay, $lt: endOfDay } };
     if (branchId) orderFilter.branch = branchId;
     const [allOrders, invItems, mItems] = await Promise.all([
       Order.find(orderFilter),
@@ -2260,6 +2313,8 @@ router.get('/reports/day', async (req, res, next) => {
 
     res.json({
       date: startOfDay.toISOString(),
+      businessDayStart: startOfDay.toISOString(),
+      businessDayEnd: endOfDay.toISOString(),
       salesDetails: {
         grossSales: Math.round(grossSales),
         netSales: Math.round(grossSales - totalDisc),
@@ -2291,14 +2346,16 @@ router.get('/dashboard/summary', async (req, res, next) => {
   try {
     const restaurantId = getRestaurantIdForRequest(req);
     const branchId = getBranchIdForRequest(req);
-    const startOfDay = new Date();
-    startOfDay.setHours(0, 0, 0, 0);
-    const endOfDay = new Date();
-    endOfDay.setHours(23, 59, 59, 999);
+    const cutoff = req.branch?.businessDayCutoffHour ?? 0;
+    const now = new Date();
 
-    // For monthly product performance we look at the current month up to today
+    const startOfDay = getCurrentBusinessDayStart(cutoff);
+    const endOfDay = now;
+
+    // For monthly product performance we look at the current month up to now
     const startOfMonth = new Date(startOfDay);
     startOfMonth.setDate(1);
+    startOfMonth.setHours(0, 0, 0, 0);
 
     const orderFilter = { restaurant: restaurantId, createdAt: { $gte: startOfDay, $lte: endOfDay } };
     if (branchId) orderFilter.branch = branchId;
@@ -2308,7 +2365,7 @@ router.get('/dashboard/summary', async (req, res, next) => {
 
     const sevenDaysAgo = new Date();
     sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-    sevenDaysAgo.setHours(0, 0, 0, 0);
+    sevenDaysAgo.setHours(cutoff, 0, 0, 0);
     const orderFilterLast7 = { restaurant: restaurantId, status: 'DELIVERED', createdAt: { $gte: sevenDaysAgo, $lte: endOfDay } };
     if (branchId) orderFilterLast7.branch = branchId;
 
