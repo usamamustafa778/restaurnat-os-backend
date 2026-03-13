@@ -8,6 +8,7 @@ const Branch = require('../models/Branch');
 const Table = require('../models/Table');
 const PosDraft = require('../models/PosDraft');
 const DaySession = require('../models/DaySession');
+const Deal = require('../models/Deal');
 const { protect, requireRole, requireRestaurant, checkSubscriptionStatus } = require('../middleware/authMiddleware');
 const { generateOrderNumber } = require('../utils/orderNumber');
 const { getOrderRooms } = require('../utils/socketRooms');
@@ -83,40 +84,110 @@ router.post('/orders', async (req, res, next) => {
     // Payment taken at counter (Orders page); POS creates order with PENDING
     const orderPaymentMethod = (paymentMethod === 'CASH' || paymentMethod === 'CARD') ? paymentMethod : 'PENDING';
 
-    const menuItemIds = items.map((i) => i.menuItemId);
-    const dbMenuItems = await MenuItem.find({
-      _id: { $in: menuItemIds },
-      restaurant: req.restaurant._id,
-      available: true,
-    });
+    // Separate regular menu items from deal items (deal items have a "deal-" prefix)
+    const regularItems = items.filter((i) => !String(i.menuItemId).startsWith('deal-'));
+    const dealLineItems = items.filter((i) => String(i.menuItemId).startsWith('deal-'));
 
-    if (dbMenuItems.length !== items.length) {
+    // Fetch regular menu items
+    const menuItemIds = regularItems.map((i) => i.menuItemId);
+    const dbMenuItems = menuItemIds.length > 0
+      ? await MenuItem.find({ _id: { $in: menuItemIds }, restaurant: req.restaurant._id, available: true })
+      : [];
+
+    if (dbMenuItems.length !== regularItems.length) {
       return res.status(400).json({ message: 'One or more items are invalid or unavailable' });
     }
 
-    // Map for quick lookup
+    // Fetch and expand deal items
+    const appliedDeals = [];
+    let dealDiscount = 0;
+    const dealExpandedMenuItems = []; // MenuItem docs from deal expansions (for inventory)
+
+    if (dealLineItems.length > 0) {
+      const dealIds = dealLineItems.map((i) => String(i.menuItemId).replace(/^deal-/, ''));
+      const dbDeals = await Deal.find({
+        _id: { $in: dealIds },
+        restaurant: req.restaurant._id,
+        isActive: true,
+      }).populate({
+        path: 'comboItems.menuItem',
+        model: 'MenuItem',
+        select: '_id name price inventoryConsumptions available',
+      });
+
+      const dealMap = new Map(dbDeals.map((d) => [d._id.toString(), d]));
+
+      for (const dealLine of dealLineItems) {
+        const dealId = String(dealLine.menuItemId).replace(/^deal-/, '');
+        const deal = dealMap.get(dealId);
+        const dealQty = Number(dealLine.quantity) || 1;
+
+        if (!deal) {
+          return res.status(400).json({ message: `Deal not found or inactive: ${dealLine.menuItemId}` });
+        }
+        if (!deal.isCurrentlyValid) {
+          return res.status(400).json({ message: `Deal "${deal.name}" is not currently available` });
+        }
+        if (deal.dealType !== 'COMBO') {
+          return res.status(400).json({ message: `Only COMBO deals can be added as order line items (deal: "${deal.name}")` });
+        }
+        if (!deal.comboItems || deal.comboItems.length === 0) {
+          return res.status(400).json({ message: `Combo deal "${deal.name}" has no items configured` });
+        }
+
+        // Calculate normal total price and collect combo menu items
+        let normalPrice = 0;
+        for (const ci of deal.comboItems) {
+          const menuItem = ci.menuItem;
+          if (!menuItem || !menuItem.available) {
+            return res.status(400).json({ message: `An item in combo deal "${deal.name}" is unavailable` });
+          }
+          normalPrice += menuItem.price * ci.quantity * dealQty;
+          dealExpandedMenuItems.push({ menuItem, quantity: ci.quantity * dealQty });
+        }
+
+        const comboTotal = (deal.comboPrice || 0) * dealQty;
+        const savings = Math.max(0, normalPrice - comboTotal);
+        dealDiscount += savings;
+
+        appliedDeals.push({
+          deal: deal._id,
+          dealName: deal.name,
+          dealType: deal.dealType,
+          discountAmount: savings,
+        });
+      }
+    }
+
+    // Unified map for inventory and cost lookups
     const menuMap = new Map(dbMenuItems.map((m) => [m._id.toString(), m]));
+    for (const { menuItem } of dealExpandedMenuItems) {
+      menuMap.set(menuItem._id.toString(), menuItem);
+    }
 
     let subtotal = 0;
-    const orderItems = items.map((i) => {
+
+    // Build order items for regular menu items
+    const regularOrderItems = regularItems.map((i) => {
       const menu = menuMap.get(i.menuItemId);
       const quantity = Number(i.quantity) || 0;
-      if (quantity <= 0) {
-        throw new Error('Quantity must be greater than zero');
-      }
+      if (quantity <= 0) throw new Error('Quantity must be greater than zero');
       const lineTotal = menu.price * quantity;
       subtotal += lineTotal;
-
-      return {
-        menuItem: menu._id,
-        name: menu.name,
-        quantity,
-        unitPrice: menu.price,
-        lineTotal,
-      };
+      return { menuItem: menu._id, name: menu.name, quantity, unitPrice: menu.price, lineTotal };
     });
 
-    const discount = Math.max(0, Number(discountAmount) || 0);
+    // Build order items for deal (combo) expansions — items at full price, discount tracked in appliedDeals
+    const dealOrderItems = dealExpandedMenuItems.map(({ menuItem, quantity }) => {
+      const lineTotal = menuItem.price * quantity;
+      subtotal += lineTotal;
+      return { menuItem: menuItem._id, name: menuItem.name, quantity, unitPrice: menuItem.price, lineTotal };
+    });
+
+    const orderItems = [...regularOrderItems, ...dealOrderItems];
+
+    // Total discount = manual discount from request + auto-savings from deal prices
+    const discount = Math.max(0, (Number(discountAmount) || 0) + dealDiscount);
     const total = Math.max(0, subtotal - discount);
 
     // Inventory deduction (branch-aware)
@@ -280,6 +351,7 @@ router.post('/orders', async (req, res, next) => {
       items: orderItems,
       subtotal,
       discountAmount: discount,
+      appliedDeals,
       total,
       ingredientCost,
       profit,
