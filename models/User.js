@@ -31,7 +31,8 @@ const userSchema = new mongoose.Schema(
         'cashier',
         'manager',
         'kitchen_staff',
-        'order_taker'
+        'order_taker',
+        'delivery_rider'
       ],
       default: 'manager',
     },

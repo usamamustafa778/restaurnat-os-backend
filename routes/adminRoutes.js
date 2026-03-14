@@ -13,6 +13,7 @@ const Branch = require('../models/Branch');
 const Table = require('../models/Table');
 const Reservation = require('../models/Reservation');
 const DailyCurrency = require('../models/DailyCurrency');
+const PaymentAccount = require('../models/PaymentAccount');
 const { protect, requireRole, requireRestaurant, checkSubscriptionStatus, resolveBranch } = require('../middleware/authMiddleware');
 const { getOrderRooms } = require('../utils/socketRooms');
 
@@ -452,6 +453,7 @@ const mapOrder = (order) => {
     paymentStatus: (order.status === 'DELIVERED' || order.status === 'COMPLETED') ? 'PAID' : 'UNPAID',
     paymentAmountReceived: order.paymentAmountReceived ?? null,
     paymentAmountReturned: order.paymentAmountReturned ?? null,
+    paymentProvider: order.paymentProvider ?? null,
   };
 };
 
@@ -787,11 +789,17 @@ router.put('/orders/:id/payment', async (req, res, next) => {
       return res.status(403).json({ message: 'Order takers cannot record payment' });
     }
     const { id } = req.params;
-    const { paymentMethod, amountReceived, amountReturned } = req.body;
+    const { paymentMethod, paymentProvider, amountReceived, amountReturned } = req.body;
     const restaurantId = getRestaurantIdForRequest(req);
 
-    if (!['CASH', 'CARD'].includes(paymentMethod)) {
-      return res.status(400).json({ message: 'Invalid paymentMethod; use CASH or CARD' });
+    if (!['CASH', 'CARD', 'ONLINE'].includes(paymentMethod)) {
+      return res.status(400).json({ message: 'Invalid paymentMethod; use CASH, CARD, or ONLINE' });
+    }
+
+    if (paymentMethod === 'ONLINE') {
+      if (!paymentProvider || !String(paymentProvider).trim()) {
+        return res.status(400).json({ message: 'For ONLINE payment, paymentProvider is required' });
+      }
     }
 
     let order;
@@ -828,6 +836,7 @@ router.put('/orders/:id/payment', async (req, res, next) => {
 
     const wasAlreadyDelivered = order.status === 'DELIVERED';
     order.paymentMethod = paymentMethod;
+    order.paymentProvider = paymentMethod === 'ONLINE' ? paymentProvider : null;
     order.paymentAmountReceived = received;
     order.paymentAmountReturned = returned;
     if (!wasAlreadyDelivered) {
@@ -3261,6 +3270,107 @@ router.delete('/reservations/:id', async (req, res, next) => {
     const reservation = await Reservation.findOneAndDelete({ _id: req.params.id, restaurant: restaurantId });
     if (!reservation) {
       return res.status(404).json({ message: 'Reservation not found' });
+    }
+    res.status(204).send();
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Payment Accounts — tenant-scoped online payment account management
+// ---------------------------------------------------------------------------
+
+const mapPaymentAccount = (a) => ({
+  id: a._id.toString(),
+  name: a.name,
+  description: a.description || '',
+  createdAt: a.createdAt,
+});
+
+// @route   GET /api/admin/payment-accounts
+// @desc    List all payment accounts for the authenticated tenant
+// @access  All restaurant staff roles
+router.get('/payment-accounts', async (req, res, next) => {
+  try {
+    const restaurantId = getRestaurantIdForRequest(req);
+    const accounts = await PaymentAccount.find({ restaurant: restaurantId }).sort({ createdAt: 1 });
+    res.json(accounts.map(mapPaymentAccount));
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @route   POST /api/admin/payment-accounts
+// @desc    Create a new payment account for the authenticated tenant
+// @access  Restaurant Admin / Admin / Manager
+router.post('/payment-accounts', async (req, res, next) => {
+  try {
+    if (!['restaurant_admin', 'super_admin', 'admin', 'manager'].includes(req.user.role)) {
+      return res.status(403).json({ message: 'Insufficient permissions to create payment accounts' });
+    }
+    const restaurantId = getRestaurantIdForRequest(req);
+    const { name, description } = req.body;
+    if (!name || !name.trim()) {
+      return res.status(400).json({ message: 'name is required' });
+    }
+    const account = await PaymentAccount.create({
+      restaurant: restaurantId,
+      name: name.trim(),
+      description: description ? description.trim() : '',
+    });
+    res.status(201).json(mapPaymentAccount(account));
+  } catch (error) {
+    if (error.code === 11000) {
+      return res.status(409).json({ message: 'A payment account with this name already exists' });
+    }
+    next(error);
+  }
+});
+
+// @route   PUT /api/admin/payment-accounts/:id
+// @desc    Update a payment account (owning tenant only)
+// @access  Restaurant Admin / Admin / Manager
+router.put('/payment-accounts/:id', async (req, res, next) => {
+  try {
+    if (!['restaurant_admin', 'super_admin', 'admin', 'manager'].includes(req.user.role)) {
+      return res.status(403).json({ message: 'Insufficient permissions to update payment accounts' });
+    }
+    const restaurantId = getRestaurantIdForRequest(req);
+    const account = await PaymentAccount.findOne({ _id: req.params.id, restaurant: restaurantId });
+    if (!account) {
+      return res.status(404).json({ message: 'Payment account not found' });
+    }
+    const { name, description } = req.body;
+    if (name !== undefined) {
+      if (!name.trim()) return res.status(400).json({ message: 'name cannot be empty' });
+      account.name = name.trim();
+    }
+    if (description !== undefined) {
+      account.description = description.trim();
+    }
+    await account.save();
+    res.json(mapPaymentAccount(account));
+  } catch (error) {
+    if (error.code === 11000) {
+      return res.status(409).json({ message: 'A payment account with this name already exists' });
+    }
+    next(error);
+  }
+});
+
+// @route   DELETE /api/admin/payment-accounts/:id
+// @desc    Delete a payment account (owning tenant only)
+// @access  Restaurant Admin / Admin / Manager
+router.delete('/payment-accounts/:id', async (req, res, next) => {
+  try {
+    if (!['restaurant_admin', 'super_admin', 'admin', 'manager'].includes(req.user.role)) {
+      return res.status(403).json({ message: 'Insufficient permissions to delete payment accounts' });
+    }
+    const restaurantId = getRestaurantIdForRequest(req);
+    const account = await PaymentAccount.findOneAndDelete({ _id: req.params.id, restaurant: restaurantId });
+    if (!account) {
+      return res.status(404).json({ message: 'Payment account not found' });
     }
     res.status(204).send();
   } catch (error) {

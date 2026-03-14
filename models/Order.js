@@ -104,6 +104,10 @@ const orderSchema = new mongoose.Schema(
       enum: ['PENDING', 'CASH', 'CARD', 'ONLINE', 'OTHER'],
       default: 'PENDING',
     },
+    paymentProvider: {
+      type: String,
+      default: null,
+    },
     paymentAmountReceived: { type: Number, default: null },
     paymentAmountReturned: { type: Number, default: null },
     status: {
