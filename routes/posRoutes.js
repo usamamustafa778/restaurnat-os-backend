@@ -1084,23 +1084,25 @@ router.get('/day-session/current', async (req, res, next) => {
       restaurant: restaurantId,
       branch: branchId || null,
       status: 'OPEN',
-    })
-      .populate('openedBy', 'name email')
-      .lean();
+    }).lean();
 
     if (!session) {
-      return res.json({ session: null });
+      return res.json(null);
     }
 
+    // Aggregate sales and order count for the active session (exclude cancelled)
+    const agg = await Order.aggregate([
+      { $match: { daySession: session._id, status: { $nin: ['CANCELLED'] } } },
+      { $group: { _id: null, totalSales: { $sum: '$total' }, totalOrders: { $sum: 1 } } },
+    ]);
+    const { totalSales = 0, totalOrders = 0 } = agg[0] || {};
+
     return res.json({
-      session: {
-        id: session._id.toString(),
-        status: session.status,
-        startAt: session.startAt,
-        endAt: session.endAt,
-        sessionKey: session.sessionKey || '',
-        openedBy: session.openedBy ? { id: session.openedBy._id?.toString(), name: session.openedBy.name } : null,
-      },
+      id: session._id.toString(),
+      startAt: session.startAt,
+      endAt: session.endAt || null,
+      totalSales,
+      totalOrders,
     });
   } catch (err) {
     next(err);
@@ -1146,13 +1148,11 @@ router.post('/day-session/end', async (req, res, next) => {
     await session.save();
 
     return res.json({
-      message: 'Day session ended successfully',
+      success: true,
       session: {
         id: session._id.toString(),
-        status: session.status,
         startAt: session.startAt,
         endAt: session.endAt,
-        sessionKey: session.sessionKey,
       },
     });
   } catch (err) {
@@ -1166,8 +1166,8 @@ router.post('/day-session/end', async (req, res, next) => {
 router.get('/day-session/list', async (req, res, next) => {
   try {
     const restaurantId = req.restaurant._id;
-    const branchId = req.headers['x-branch-id'] || req.query.branchId || null;
-    const limit = parseInt(req.query.limit) || 30;
+    const branchId = req.query.branchId || req.headers['x-branch-id'] || null;
+    const limit = parseInt(req.query.limit) || 20;
     const offset = parseInt(req.query.offset) || 0;
 
     // When branchId is provided filter to that branch only;
@@ -1290,6 +1290,7 @@ router.post('/day-session/bulk-orders', async (req, res, next) => {
       summary,
       orders: orders.map((o) => ({
         id: o._id.toString(),
+        sessionId: o.daySession ? o.daySession.toString() : null,
         orderNumber: o.orderNumber,
         orderType: o.orderType,
         paymentMethod: o.paymentMethod,
