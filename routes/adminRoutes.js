@@ -1658,6 +1658,10 @@ router.post('/inventory', async (req, res, next) => {
     if (!name || !unit) {
       return res.status(400).json({ message: 'Name and unit are required' });
     }
+    const VALID_UNITS = ['gram', 'kilogram', 'milliliter', 'liter', 'piece', 'dozen', 'box', 'pack', 'bag', 'bottle', 'can'];
+    if (!VALID_UNITS.includes(unit)) {
+      return res.status(400).json({ message: 'Invalid unit. Must be one of: gram, kilogram, milliliter, liter, piece, dozen, box, pack, bag, bottle, can' });
+    }
     if (!branchId) {
       return res.status(400).json({ message: 'Please select a specific branch before adding inventory.' });
     }
@@ -1737,7 +1741,13 @@ router.put('/inventory/:id', async (req, res, next) => {
       }
       item.name = name.trim();
     }
-    if (unit !== undefined) item.unit = unit;
+    if (unit !== undefined) {
+      const VALID_UNITS = ['gram', 'kilogram', 'milliliter', 'liter', 'piece', 'dozen', 'box', 'pack', 'bag', 'bottle', 'can'];
+      if (!VALID_UNITS.includes(unit)) {
+        return res.status(400).json({ message: 'Invalid unit. Must be one of: gram, kilogram, milliliter, liter, piece, dozen, box, pack, bag, bottle, can' });
+      }
+      item.unit = unit;
+    }
 
     if (branchId) {
       // Save any restaurant-level definition changes

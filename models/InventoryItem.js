@@ -22,7 +22,7 @@ const inventoryItemSchema = new mongoose.Schema(
     },
     unit: {
       type: String,
-      enum: ['kg', 'liter', 'gram', 'ml', 'piece'],
+      enum: ['gram', 'kilogram', 'milliliter', 'liter', 'piece', 'dozen', 'box', 'pack', 'bag', 'bottle', 'can'],
       required: true,
     },
     currentStock: {
