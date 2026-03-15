@@ -56,7 +56,7 @@ function getMenuItemIngredientCost(menuItem, inventoryMap) {
 // @access  Staff / Restaurant Admin
 router.post('/orders', async (req, res, next) => {
   try {
-    const { items, orderType, paymentMethod, discountAmount = 0, customerName = '', customerPhone = '', deliveryAddress = '', branchId, tableNumber, tableId, tableName, amountReceived } = req.body;
+    const { items, orderType, paymentMethod, paymentProvider, discountAmount = 0, customerName = '', customerPhone = '', deliveryAddress = '', branchId, tableNumber, tableId, tableName, amountReceived } = req.body;
 
     if (!Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ message: 'Order items are required' });
@@ -81,8 +81,11 @@ router.post('/orders', async (req, res, next) => {
       return res.status(400).json({ message: 'Invalid orderType' });
     }
 
-    // Payment taken at counter (Orders page); POS creates order with PENDING
-    const orderPaymentMethod = (paymentMethod === 'CASH' || paymentMethod === 'CARD') ? paymentMethod : 'PENDING';
+    // Payment taken at counter: CASH, CARD, or ONLINE => paid at creation; otherwise PENDING
+    const orderPaymentMethod = (paymentMethod === 'CASH' || paymentMethod === 'CARD' || paymentMethod === 'ONLINE') ? paymentMethod : 'PENDING';
+    if (orderPaymentMethod === 'ONLINE' && (!paymentProvider || !String(paymentProvider).trim())) {
+      return res.status(400).json({ message: 'paymentProvider is required when paymentMethod is ONLINE' });
+    }
 
     // Separate regular menu items from deal items (deal items have a "deal-" prefix)
     const regularItems = items.filter((i) => !String(i.menuItemId).startsWith('deal-'));
@@ -320,7 +323,7 @@ router.post('/orders', async (req, res, next) => {
       );
     }
 
-    const paidAtCreation = orderPaymentMethod === 'CASH' || orderPaymentMethod === 'CARD';
+    const paidAtCreation = orderPaymentMethod === 'CASH' || orderPaymentMethod === 'CARD' || orderPaymentMethod === 'ONLINE';
     let paymentAmountReceived = null;
     let paymentAmountReturned = null;
     if (paidAtCreation && orderPaymentMethod === 'CASH' && amountReceived != null) {
@@ -343,6 +346,7 @@ router.post('/orders', async (req, res, next) => {
       createdBy: req.user.id,
       orderType,
       paymentMethod: orderPaymentMethod,
+      paymentProvider: orderPaymentMethod === 'ONLINE' && paymentProvider ? String(paymentProvider).trim() : undefined,
       // Always start as NEW_ORDER so order flows through kitchen,
       // even when payment is captured at creation.
       status: 'NEW_ORDER',
