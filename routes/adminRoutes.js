@@ -620,6 +620,9 @@ router.get('/orders', async (req, res, next) => {
     if (req.query.source) {
       query.source = req.query.source;
     }
+    if (req.query.mine === 'true') {
+      query.createdBy = req.user.id;
+    }
 
     const orders = await Order.find(query)
       .populate('createdBy', 'name')
