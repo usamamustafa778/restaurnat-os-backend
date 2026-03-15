@@ -2252,6 +2252,9 @@ router.get('/reports/sales', async (req, res, next) => {
     const itemStats = new Map();
     const dailyMap = new Map(); // date YYYY-MM-DD -> total sales
     const paymentDistribution = {};
+    const paymentMethodMap = {}; // for paymentRows
+    const orderTypeMap = {}; // for orderTypeRows
+    const paymentAccountMap = {}; // for ONLINE account breakdown by paymentProvider
     const isSingleDay = toDate.getTime() - fromDate.getTime() <= 24 * 60 * 60 * 1000;
     const hourlySales = isSingleDay ? new Array(24).fill(0) : null;
 
@@ -2282,6 +2285,26 @@ router.get('/reports/sales', async (req, res, next) => {
       dailyMap.set(dateKey, (dailyMap.get(dateKey) || 0) + order.total);
       const pm = order.paymentMethod || 'CASH';
       paymentDistribution[pm] = (paymentDistribution[pm] || 0) + order.total;
+
+      // Aggregate payment method rows (counts + amount)
+      if (!paymentMethodMap[pm]) paymentMethodMap[pm] = { orders: 0, amount: 0 };
+      paymentMethodMap[pm].orders += 1;
+      paymentMethodMap[pm].amount += order.total;
+
+      // Aggregate order type rows
+      const ot = order.orderType || 'DINE_IN';
+      if (!orderTypeMap[ot]) orderTypeMap[ot] = { orders: 0, amount: 0 };
+      orderTypeMap[ot].orders += 1;
+      orderTypeMap[ot].amount += order.total;
+
+      // Aggregate online payment accounts by paymentProvider
+      if (order.paymentMethod === 'ONLINE' && order.paymentProvider && String(order.paymentProvider).trim()) {
+        const key = String(order.paymentProvider).trim();
+        if (!paymentAccountMap[key]) paymentAccountMap[key] = { orders: 0, amount: 0 };
+        paymentAccountMap[key].orders += 1;
+        paymentAccountMap[key].amount += order.total;
+      }
+
       if (hourlySales) hourlySales[new Date(order.createdAt).getHours()] += order.total;
       // Profit = revenue - cost (always recomputed for report consistency)
       let orderCost = 0;
@@ -2349,6 +2372,43 @@ router.get('/reports/sales', async (req, res, next) => {
       dailySales,
       paymentDistribution,
     };
+
+    // Payment-wise breakdown (shape compatible with day-report paymentRows)
+    const pmLabels = { CASH: 'Cash', CARD: 'Card', ONLINE: 'Online', OTHER: 'Other', PENDING: 'To be paid' };
+    const paymentRows = Object.entries(paymentMethodMap).map(([m, d]) => ({
+      method: pmLabels[m] || m,
+      orders: d.orders,
+      amount: Math.round(d.amount),
+      percent: totalOrders > 0 ? ((d.orders / totalOrders) * 100).toFixed(1) + '%' : '0%',
+    }));
+    if (paymentRows.length > 0) {
+      paymentRows.push({
+        method: 'Total',
+        orders: totalOrders,
+        amount: Math.round(totalRevenue),
+        percent: '100%',
+      });
+    }
+    payload.paymentRows = paymentRows;
+
+    // Order type breakdown rows (optional)
+    const otLabels = { DINE_IN: 'Dine In', TAKEAWAY: 'Takeaway', DELIVERY: 'Delivery' };
+    const orderTypeRows = Object.entries(orderTypeMap).map(([t, d]) => ({
+      type: otLabels[t] || t,
+      orders: d.orders,
+      amount: Math.round(d.amount),
+      percent: totalOrders > 0 ? ((d.orders / totalOrders) * 100).toFixed(1) + '%' : '0%',
+    }));
+    payload.orderTypeRows = orderTypeRows;
+
+    // Online payment account breakdown rows (grouped by paymentProvider)
+    const paymentAccountRows = Object.entries(paymentAccountMap).map(([name, d]) => ({
+      accountName: name,
+      accountLabel: null,
+      orders: d.orders,
+      amount: Math.round(d.amount),
+    }));
+    payload.paymentAccountRows = paymentAccountRows;
     if (hourlySales) payload.hourlySales = hourlySales;
     res.json(payload);
   } catch (error) {
