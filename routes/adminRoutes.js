@@ -460,6 +460,9 @@ const mapOrder = (order) => {
     assignedRiderId: order.assignedRiderId ? order.assignedRiderId.toString() : null,
     assignedRiderName: order.assignedRiderName || '',
     assignedRiderPhone: order.assignedRiderPhone || '',
+    cancelReason: order.cancelReason || null,
+    cancelledAt: order.cancelledAt || null,
+    cancelledBy: order.cancelledBy ? order.cancelledBy.toString() : null,
   };
 };
 
@@ -746,7 +749,7 @@ router.put('/orders/:id/status', async (req, res, next) => {
       return res.status(403).json({ message: 'Order takers can only view orders' });
     }
     const { id } = req.params;
-    const { status } = req.body;
+    const { status, cancelReason } = req.body;
     const restaurantId = getRestaurantIdForRequest(req);
 
     if (!['NEW_ORDER', 'PROCESSING', 'READY', 'OUT_FOR_DELIVERY', 'DELIVERED', 'CANCELLED'].includes(status)) {
@@ -771,6 +774,15 @@ router.put('/orders/:id/status', async (req, res, next) => {
     }
 
     order.status = status;
+
+    if (status === 'CANCELLED') {
+      if (cancelReason && String(cancelReason).trim()) {
+        order.cancelReason = String(cancelReason).trim();
+      }
+      order.cancelledAt = new Date();
+      order.cancelledBy = req.user.id;
+    }
+
     await order.save();
 
     const io = req.app.get('io');
@@ -3127,7 +3139,7 @@ router.get('/kitchen/orders', async (req, res, next) => {
 router.put('/kitchen/orders/:id/status', async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { status } = req.body;
+    const { status, cancelReason } = req.body;
     const restaurantId = getRestaurantIdForRequest(req);
     const branchId = getBranchIdForRequest(req);
 
@@ -3151,6 +3163,15 @@ router.put('/kitchen/orders/:id/status', async (req, res, next) => {
     }
 
     order.status = status;
+
+    if (status === 'CANCELLED') {
+      if (cancelReason && String(cancelReason).trim()) {
+        order.cancelReason = String(cancelReason).trim();
+      }
+      order.cancelledAt = new Date();
+      order.cancelledBy = req.user.id;
+    }
+
     await order.save();
 
     const io = req.app.get('io');

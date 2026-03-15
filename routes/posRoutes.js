@@ -452,13 +452,21 @@ router.post('/orders/:id/cancel', async (req, res, next) => {
       }
     }
 
+    const { cancelReason } = req.body;
     order.status = 'CANCELLED';
+    if (cancelReason && String(cancelReason).trim()) {
+      order.cancelReason = String(cancelReason).trim();
+    }
+    order.cancelledAt = new Date();
+    order.cancelledBy = req.user.id;
     await order.save();
 
     res.json({
       id: order._id,
       orderNumber: order.orderNumber,
       status: order.status,
+      cancelReason: order.cancelReason || null,
+      cancelledAt: order.cancelledAt,
     });
   } catch (error) {
     next(error);
@@ -893,6 +901,9 @@ router.get('/transactions', async (req, res, next) => {
         name: order.createdBy.name,
         email: order.createdBy.email,
       } : null,
+      cancelReason: order.cancelReason || null,
+      cancelledAt: order.cancelledAt || null,
+      cancelledBy: order.cancelledBy ? order.cancelledBy.toString() : null,
       createdAt: order.createdAt,
       updatedAt: order.updatedAt,
     }));
@@ -968,6 +979,9 @@ router.get('/transactions/:id', async (req, res, next) => {
         name: transaction.createdBy.name,
         email: transaction.createdBy.email,
       } : null,
+      cancelReason: transaction.cancelReason || null,
+      cancelledAt: transaction.cancelledAt || null,
+      cancelledBy: transaction.cancelledBy ? transaction.cancelledBy.toString() : null,
       createdAt: transaction.createdAt,
       updatedAt: transaction.updatedAt,
     };
@@ -1007,8 +1021,9 @@ router.delete('/transactions/:id', async (req, res, next) => {
       return res.status(400).json({ message: 'Transaction is already cancelled' });
     }
 
-    // Soft delete by marking as CANCELLED (this will also reverse inventory via the existing cancel endpoint)
     transaction.status = 'CANCELLED';
+    transaction.cancelledAt = new Date();
+    transaction.cancelledBy = req.user.id;
     await transaction.save();
 
     // Optionally reverse inventory (similar to cancel order endpoint)
