@@ -110,9 +110,17 @@ const orderSchema = new mongoose.Schema(
     },
     paymentAmountReceived: { type: Number, default: null },
     paymentAmountReturned: { type: Number, default: null },
+    assignedRiderId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null,
+    },
+    assignedRiderName: { type: String, default: '' },
+    assignedRiderPhone: { type: String, default: '' },
+    deliveryPaymentCollected: { type: Boolean, default: false },
     status: {
       type: String,
-      enum: ['NEW_ORDER', 'PROCESSING', 'READY', 'DELIVERED', 'CANCELLED'],
+      enum: ['NEW_ORDER', 'PROCESSING', 'READY', 'OUT_FOR_DELIVERY', 'DELIVERED', 'CANCELLED'],
       default: 'NEW_ORDER',
     },
     source: {

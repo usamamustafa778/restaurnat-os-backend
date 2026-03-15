@@ -36,6 +36,16 @@ const userSchema = new mongoose.Schema(
       ],
       default: 'manager',
     },
+    phone: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+    vehicleType: {
+      type: String,
+      enum: ['bike', 'bicycle', 'car', 'other', null],
+      default: null,
+    },
     profileImageUrl: {
       type: String,
       default: null,

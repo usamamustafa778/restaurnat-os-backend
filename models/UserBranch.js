@@ -16,7 +16,7 @@ const userBranchSchema = new mongoose.Schema(
     },
     role: {
       type: String,
-      enum: ['manager', 'cashier', 'kitchen_staff', 'admin', 'product_manager', 'order_taker'],
+      enum: ['manager', 'cashier', 'kitchen_staff', 'admin', 'product_manager', 'order_taker', 'delivery_rider'],
       default: 'manager',
     },
   },

@@ -384,6 +384,8 @@ const mapUser = (user, branchAssignments) => {
   name: user.name,
   email: user.email,
   role: user.role,
+  phone: user.phone || '',
+  vehicleType: user.vehicleType || null,
   profileImageUrl: user.profileImageUrl || null,
   createdAt: user.createdAt.toISOString(),
   };
@@ -454,6 +456,10 @@ const mapOrder = (order) => {
     paymentAmountReceived: order.paymentAmountReceived ?? null,
     paymentAmountReturned: order.paymentAmountReturned ?? null,
     paymentProvider: order.paymentProvider ?? null,
+    deliveryPaymentCollected: order.deliveryPaymentCollected ?? false,
+    assignedRiderId: order.assignedRiderId ? order.assignedRiderId.toString() : null,
+    assignedRiderName: order.assignedRiderName || '',
+    assignedRiderPhone: order.assignedRiderPhone || '',
   };
 };
 
@@ -740,7 +746,7 @@ router.put('/orders/:id/status', async (req, res, next) => {
     const { status } = req.body;
     const restaurantId = getRestaurantIdForRequest(req);
 
-    if (!['NEW_ORDER', 'PROCESSING', 'READY', 'DELIVERED', 'CANCELLED'].includes(status)) {
+    if (!['NEW_ORDER', 'PROCESSING', 'READY', 'OUT_FOR_DELIVERY', 'DELIVERED', 'CANCELLED'].includes(status)) {
       return res.status(400).json({ message: 'Invalid status' });
     }
 
@@ -756,6 +762,11 @@ router.put('/orders/:id/status', async (req, res, next) => {
       return res.status(404).json({ message: 'Order not found' });
     }
 
+    // Delivery orders must go through OUT_FOR_DELIVERY — use the assign-rider endpoint
+    if (order.orderType === 'DELIVERY' && order.status === 'READY' && status === 'DELIVERED') {
+      return res.status(400).json({ message: 'Delivery orders must be assigned to a rider before marking as delivered. Use the assign-rider endpoint.' });
+    }
+
     order.status = status;
     await order.save();
 
@@ -766,8 +777,8 @@ router.put('/orders/:id/status', async (req, res, next) => {
       rooms.forEach((room) => io.to(room).emit('order:updated', payload));
     }
 
-    // When order is delivered or cancelled, free the table (set isAvailable = true)
-    if ((status === 'DELIVERED' || status === 'CANCELLED') && order.tableName && order.tableName.trim()) {
+    // When order is delivered, out for delivery, or cancelled, free the table
+    if ((status === 'DELIVERED' || status === 'CANCELLED' || status === 'OUT_FOR_DELIVERY') && order.tableName && order.tableName.trim()) {
       await Table.findOneAndUpdate(
         { restaurant: order.restaurant, branch: order.branch || null, name: order.tableName.trim() },
         { $set: { isAvailable: true } }
@@ -857,6 +868,102 @@ router.put('/orders/:id/payment', async (req, res, next) => {
         { $set: { isAvailable: true } }
       );
     }
+
+    res.json(mapOrder(order));
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @route   PUT /api/admin/orders/:id/assign-rider
+// @desc    Assign a delivery rider to an order; sets status to OUT_FOR_DELIVERY
+// @access  Restaurant Admin / Admin / Manager / Cashier
+router.put('/orders/:id/assign-rider', async (req, res, next) => {
+  try {
+    if (['order_taker', 'kitchen_staff', 'product_manager'].includes(req.user.role)) {
+      return res.status(403).json({ message: 'Insufficient permissions to assign riders' });
+    }
+    const { riderId } = req.body;
+    if (!riderId) {
+      return res.status(400).json({ message: 'riderId is required' });
+    }
+
+    const restaurantId = getRestaurantIdForRequest(req);
+
+    const rider = await User.findOne({ _id: riderId, restaurant: restaurantId, role: 'delivery_rider' });
+    if (!rider) {
+      return res.status(404).json({ message: 'Delivery rider not found in this restaurant' });
+    }
+
+    let order;
+    if (riderId && /^[0-9a-fA-F]{24}$/.test(req.params.id)) {
+      order = await Order.findOne({ _id: req.params.id, restaurant: restaurantId }).populate('createdBy', 'name');
+    }
+    if (!order) {
+      order = await Order.findOne({ orderNumber: req.params.id, restaurant: restaurantId }).populate('createdBy', 'name');
+    }
+    if (!order) {
+      return res.status(404).json({ message: 'Order not found' });
+    }
+    if (order.orderType !== 'DELIVERY') {
+      return res.status(400).json({ message: 'Rider assignment is only valid for DELIVERY orders' });
+    }
+    if (order.status === 'DELIVERED' || order.status === 'CANCELLED') {
+      return res.status(400).json({ message: `Cannot assign rider to a ${order.status.toLowerCase()} order` });
+    }
+
+    order.assignedRiderId = rider._id;
+    order.assignedRiderName = rider.name;
+    order.assignedRiderPhone = rider.phone || '';
+    order.status = 'OUT_FOR_DELIVERY';
+    await order.save();
+
+    const io = req.app.get('io');
+    if (io) {
+      const rooms = getOrderRooms(order.restaurant, order.branch);
+      const payload = { id: order._id.toString(), orderNumber: order.orderNumber, status: order.status, assignedRiderId: rider._id.toString(), assignedRiderName: rider.name };
+      rooms.forEach((room) => io.to(room).emit('order:updated', payload));
+    }
+
+    res.json(mapOrder(order));
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @route   PUT /api/admin/orders/:id/collect-payment
+// @desc    Cashier records payment collected from rider after delivery
+// @access  Restaurant Admin / Admin / Manager / Cashier
+router.put('/orders/:id/collect-payment', async (req, res, next) => {
+  try {
+    if (['order_taker', 'kitchen_staff', 'product_manager'].includes(req.user.role)) {
+      return res.status(403).json({ message: 'Insufficient permissions to record payment collection' });
+    }
+    const restaurantId = getRestaurantIdForRequest(req);
+    const { paymentMethod = 'CASH' } = req.body;
+
+    let order;
+    if (/^[0-9a-fA-F]{24}$/.test(req.params.id)) {
+      order = await Order.findOne({ _id: req.params.id, restaurant: restaurantId }).populate('createdBy', 'name');
+    }
+    if (!order) {
+      order = await Order.findOne({ orderNumber: req.params.id, restaurant: restaurantId }).populate('createdBy', 'name');
+    }
+    if (!order) {
+      return res.status(404).json({ message: 'Order not found' });
+    }
+    if (order.status !== 'DELIVERED') {
+      return res.status(400).json({ message: 'Payment can only be collected for DELIVERED orders' });
+    }
+    if (order.deliveryPaymentCollected) {
+      return res.status(400).json({ message: 'Payment has already been collected for this order' });
+    }
+
+    order.deliveryPaymentCollected = true;
+    order.paymentMethod = paymentMethod;
+    order.paymentAmountReceived = order.total;
+    order.paymentAmountReturned = 0;
+    await order.save();
 
     res.json(mapOrder(order));
   } catch (error) {
@@ -2616,7 +2723,7 @@ router.get('/users', async (req, res, next) => {
 // @access  Restaurant Admin / Super Admin
 router.post('/users', async (req, res, next) => {
   try {
-    const { name, email, password, role, profileImageUrl, branchIds } = req.body;
+    const { name, email, password, role, profileImageUrl, branchIds, phone, vehicleType } = req.body;
     const restaurantId = getRestaurantIdForRequest(req);
 
     if (!name || !email || !password) {
@@ -2626,12 +2733,12 @@ router.post('/users', async (req, res, next) => {
     // Manager can only add non-admin, non-manager roles. Admin/restaurant_admin can add any role.
     const isManagerRequester = req.user.role === 'manager';
     const allowedRoles = isManagerRequester
-      ? ['product_manager', 'cashier', 'kitchen_staff', 'order_taker']
-      : ['admin', 'product_manager', 'cashier', 'manager', 'kitchen_staff', 'order_taker'];
+      ? ['product_manager', 'cashier', 'kitchen_staff', 'order_taker', 'delivery_rider']
+      : ['admin', 'product_manager', 'cashier', 'manager', 'kitchen_staff', 'order_taker', 'delivery_rider'];
     if (role && !allowedRoles.includes(role)) {
       return res.status(400).json({
         message: isManagerRequester
-          ? 'Managers can only add Product Manager, Cashier, Kitchen Staff, or Order Taker'
+          ? 'Managers can only add Product Manager, Cashier, Kitchen Staff, Order Taker, or Delivery Rider'
           : 'Invalid role',
       });
     }
@@ -2647,6 +2754,8 @@ router.post('/users', async (req, res, next) => {
       password,
       role: role || 'manager',
       profileImageUrl: profileImageUrl || null,
+      phone: phone ? phone.trim() : '',
+      vehicleType: vehicleType || null,
       restaurant: restaurantId,
     });
 
@@ -2694,8 +2803,8 @@ router.put('/users/:id', async (req, res, next) => {
     if (role !== undefined) {
       const isManagerRequester = req.user.role === 'manager';
       const allowedRoles = isManagerRequester
-        ? ['product_manager', 'cashier', 'kitchen_staff', 'order_taker']
-        : ['admin', 'product_manager', 'cashier', 'manager', 'kitchen_staff', 'order_taker'];
+        ? ['product_manager', 'cashier', 'kitchen_staff', 'order_taker', 'delivery_rider']
+        : ['admin', 'product_manager', 'cashier', 'manager', 'kitchen_staff', 'order_taker', 'delivery_rider'];
       if (!allowedRoles.includes(role)) {
         return res.status(400).json({
           message: isManagerRequester
@@ -2710,6 +2819,12 @@ router.put('/users/:id', async (req, res, next) => {
     }
     if (profileImageUrl !== undefined) {
       user.profileImageUrl = profileImageUrl || null;
+    }
+    if (req.body.phone !== undefined) {
+      user.phone = req.body.phone ? req.body.phone.trim() : '';
+    }
+    if (req.body.vehicleType !== undefined) {
+      user.vehicleType = req.body.vehicleType || null;
     }
 
     await user.save();
