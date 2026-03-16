@@ -87,13 +87,22 @@ router.get('/', protect, async (req, res) => {
  */
 router.get('/active', async (req, res) => {
   try {
-    const { restaurantId, branchId } = req.query;
+    const { restaurantId, branchId, subdomain } = req.query;
 
-    if (!restaurantId) {
-      return res.status(400).json({ message: 'restaurantId is required' });
+    let resolvedRestaurantId = restaurantId;
+    if (!resolvedRestaurantId && subdomain) {
+      const Restaurant = require('../models/Restaurant');
+      const restaurant = await Restaurant.findOne({
+        'website.subdomain': subdomain.toLowerCase().trim(),
+      });
+      if (restaurant) resolvedRestaurantId = restaurant._id.toString();
     }
 
-    const deals = await Deal.findApplicableDeals(restaurantId, branchId);
+    if (!resolvedRestaurantId) {
+      return res.status(400).json({ message: 'restaurantId or subdomain is required' });
+    }
+
+    const deals = await Deal.findApplicableDeals(resolvedRestaurantId, branchId);
 
     await Deal.populate(deals, [
       { path: 'applicableMenuItems' },

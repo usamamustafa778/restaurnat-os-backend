@@ -28,6 +28,7 @@ const dealRoutes = require('./routes/dealRoutes');
 const menuRoutes = require('./routes/menuRoutes');
 const contactRoutes = require('./routes/contactRoutes');
 const riderRoutes = require('./routes/riderRoutes');
+const storefrontRoutes = require('./routes/storefrontRoutes');
 
 const app = express();
 const server = http.createServer(app);
@@ -80,8 +81,23 @@ io.on('connection', (socket) => {
 
 app.set('io', io);
 
-// Middleware
-app.use(cors());
+// CORS – allow dashboard and storefront origins
+const corsOptions = {
+  origin: function (origin, callback) {
+    const dashboardOrigin = process.env.DASHBOARD_ORIGIN || '';
+    const storefrontPattern = process.env.STOREFRONT_ORIGIN_PATTERN || '';
+    // Allow requests with no origin (server-to-server, Postman, etc.)
+    if (!origin) return callback(null, true);
+    if (dashboardOrigin && origin === dashboardOrigin) return callback(null, true);
+    if (storefrontPattern && new RegExp(storefrontPattern).test(origin)) return callback(null, true);
+    // Fallback: allow all in dev when no origins are configured
+    if (!dashboardOrigin && !storefrontPattern) return callback(null, true);
+    callback(null, true);
+  },
+  credentials: true,
+};
+
+app.use(cors(corsOptions));
 app.use(express.json());
 app.use(morgan('dev'));
 
@@ -100,6 +116,7 @@ app.use('/api/deals', dealRoutes);
 app.use('/api/menu', menuRoutes);
 app.use('/api', contactRoutes);
 app.use('/api/rider', riderRoutes);
+app.use('/api/storefront', storefrontRoutes);
 
 // Health check
 app.get('/health', (req, res) => {

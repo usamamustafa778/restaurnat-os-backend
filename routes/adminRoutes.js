@@ -2096,6 +2096,8 @@ router.put('/website', async (req, res, next) => {
       openingHoursText,
       websiteSections,
       allowWebsiteOrders,
+      template,
+      customDomain,
     } = req.body;
     const restaurantId = getRestaurantIdForRequest(req);
     const branchId = getBranchIdForRequest(req);
@@ -2119,6 +2121,8 @@ router.put('/website', async (req, res, next) => {
     if (contactEmail !== undefined) restaurant.website.contactEmail = contactEmail;
     if (address !== undefined) restaurant.website.address = address;
     if (typeof isPublic === 'boolean') restaurant.website.isPublic = isPublic;
+    if (template !== undefined) restaurant.website.template = template;
+    if (customDomain !== undefined) restaurant.website.customDomain = customDomain;
 
     // Branch-aware dynamic fields
     const dynamicKeys = [

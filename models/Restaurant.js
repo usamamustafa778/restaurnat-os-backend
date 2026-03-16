@@ -112,6 +112,17 @@ const websiteSettingsSchema = new mongoose.Schema(
         ref: 'MenuItem',
       }],
     }],
+    // Storefront template selection (maps to a template repo/directory)
+    template: {
+      type: String,
+      default: 'classic',
+      enum: ['classic', 'modern', 'minimal'],
+    },
+    // Custom domain for the storefront (e.g. urbanspoon.pk)
+    customDomain: {
+      type: String,
+      default: null,
+    },
   },
   { _id: false }
 );
