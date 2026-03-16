@@ -117,6 +117,7 @@ const orderSchema = new mongoose.Schema(
     },
     assignedRiderName: { type: String, default: '' },
     assignedRiderPhone: { type: String, default: '' },
+    deliveryCharges: { type: Number, default: 0, min: 0 },
     deliveryPaymentCollected: { type: Boolean, default: false },
     status: {
       type: String,
@@ -170,6 +171,10 @@ const orderSchema = new mongoose.Schema(
     orderNumber: {
       type: String,
       required: true,
+    },
+    grandTotal: {
+      type: Number,
+      default: null,
     },
     cancelReason: {
       type: String,

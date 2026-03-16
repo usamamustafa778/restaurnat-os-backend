@@ -429,6 +429,7 @@ const mapOrder = (order) => {
     tableName: order.tableName || '',
     tableId: order.table ? order.table.toString() : null,
     total: order.total,
+    grandTotal: order.grandTotal ?? order.total,
     subtotal: order.subtotal,
     discountAmount: order.discountAmount || 0,
     status: order.status,
@@ -456,6 +457,7 @@ const mapOrder = (order) => {
     paymentAmountReceived: order.paymentAmountReceived ?? null,
     paymentAmountReturned: order.paymentAmountReturned ?? null,
     paymentProvider: order.paymentProvider ?? null,
+    deliveryCharges: order.deliveryCharges ?? 0,
     deliveryPaymentCollected: order.deliveryPaymentCollected ?? false,
     assignedRiderId: order.assignedRiderId ? order.assignedRiderId.toString() : null,
     assignedRiderName: order.assignedRiderName || '',
@@ -898,7 +900,7 @@ router.put('/orders/:id/assign-rider', async (req, res, next) => {
     if (['order_taker', 'kitchen_staff', 'product_manager'].includes(req.user.role)) {
       return res.status(403).json({ message: 'Insufficient permissions to assign riders' });
     }
-    const { riderId } = req.body;
+    const { riderId, deliveryCharges } = req.body;
     if (!riderId) {
       return res.status(400).json({ message: 'riderId is required' });
     }
@@ -927,9 +929,18 @@ router.put('/orders/:id/assign-rider', async (req, res, next) => {
       return res.status(400).json({ message: `Cannot assign rider to a ${order.status.toLowerCase()} order` });
     }
 
+    if (order.branch) {
+      const riderBranchLink = await UserBranch.findOne({ user: riderId, branch: order.branch });
+      if (!riderBranchLink) {
+        return res.status(400).json({ message: 'This rider is not assigned to the branch this order belongs to' });
+      }
+    }
+
     order.assignedRiderId = rider._id;
     order.assignedRiderName = rider.name;
     order.assignedRiderPhone = rider.phone || '';
+    order.deliveryCharges = Math.max(0, Number(deliveryCharges) || 0);
+    order.grandTotal = order.total + order.deliveryCharges;
     order.status = 'OUT_FOR_DELIVERY';
     await order.save();
 
@@ -2294,33 +2305,36 @@ router.get('/reports/sales', async (req, res, next) => {
       }
     }
 
+    let totalDeliveryCharges = 0;
     for (const order of orders) {
-      totalRevenue += order.total;
+      const orderRevenue = order.grandTotal ?? order.total;
+      totalRevenue += orderRevenue;
+      totalDeliveryCharges += order.deliveryCharges || 0;
       const dateKey = new Date(order.createdAt).toISOString().slice(0, 10);
-      dailyMap.set(dateKey, (dailyMap.get(dateKey) || 0) + order.total);
+      dailyMap.set(dateKey, (dailyMap.get(dateKey) || 0) + orderRevenue);
       const pm = order.paymentMethod || 'CASH';
-      paymentDistribution[pm] = (paymentDistribution[pm] || 0) + order.total;
+      paymentDistribution[pm] = (paymentDistribution[pm] || 0) + orderRevenue;
 
       // Aggregate payment method rows (counts + amount)
       if (!paymentMethodMap[pm]) paymentMethodMap[pm] = { orders: 0, amount: 0 };
       paymentMethodMap[pm].orders += 1;
-      paymentMethodMap[pm].amount += order.total;
+      paymentMethodMap[pm].amount += orderRevenue;
 
       // Aggregate order type rows
       const ot = order.orderType || 'DINE_IN';
       if (!orderTypeMap[ot]) orderTypeMap[ot] = { orders: 0, amount: 0 };
       orderTypeMap[ot].orders += 1;
-      orderTypeMap[ot].amount += order.total;
+      orderTypeMap[ot].amount += orderRevenue;
 
       // Aggregate online payment accounts by paymentProvider
       if (order.paymentMethod === 'ONLINE' && order.paymentProvider && String(order.paymentProvider).trim()) {
         const key = String(order.paymentProvider).trim();
         if (!paymentAccountMap[key]) paymentAccountMap[key] = { orders: 0, amount: 0 };
         paymentAccountMap[key].orders += 1;
-        paymentAccountMap[key].amount += order.total;
+        paymentAccountMap[key].amount += orderRevenue;
       }
 
-      if (hourlySales) hourlySales[new Date(order.createdAt).getHours()] += order.total;
+      if (hourlySales) hourlySales[new Date(order.createdAt).getHours()] += orderRevenue;
       // Profit = revenue - cost (always recomputed for report consistency)
       let orderCost = 0;
       if (invCostMapForReport.size > 0) {
@@ -2330,7 +2344,7 @@ router.get('/reports/sales', async (req, res, next) => {
           orderCost += computeItemCost(menu, invCostMapForReport) * orderItem.quantity;
         }
       }
-      totalProfit += order.total - orderCost;
+      totalProfit += orderRevenue - orderCost;
       for (const item of order.items) {
         const key = item.menuItem.toString();
         const existing = itemStats.get(key) || {
@@ -2381,6 +2395,7 @@ router.get('/reports/sales', async (req, res, next) => {
       from: fromDate,
       to: toDate,
       totalRevenue,
+      totalDeliveryCharges,
       totalProfit: Math.round(totalProfit),
       totalOrders,
       topItems,
@@ -2469,7 +2484,8 @@ router.get('/reports/day', async (req, res, next) => {
     const cancelled = allOrders.filter(o => o.status === 'CANCELLED');
     const grossSales = completed.reduce((s, o) => s + o.subtotal, 0);
     const totalDisc = completed.reduce((s, o) => s + (o.discountAmount || 0), 0);
-    const totalRev = completed.reduce((s, o) => s + o.total, 0);
+    const totalDelCharges = completed.reduce((s, o) => s + (o.deliveryCharges || 0), 0);
+    const totalRev = completed.reduce((s, o) => s + (o.grandTotal ?? o.total), 0);
 
     let budgetCost = 0;
     for (const o of completed) {
@@ -2485,7 +2501,7 @@ router.get('/reports/day', async (req, res, next) => {
       const m = o.paymentMethod || 'CASH';
       if (!pm[m]) pm[m] = { orders: 0, amount: 0 };
       pm[m].orders++;
-      pm[m].amount += o.total;
+      pm[m].amount += o.grandTotal ?? o.total;
     }
     const pmLabels = { CASH: 'Cash', CARD: 'Card', ONLINE: 'Online', OTHER: 'Foodpanda' };
     const paymentRows = Object.entries(pm).map(([m, d]) => ({
@@ -2502,7 +2518,7 @@ router.get('/reports/day', async (req, res, next) => {
       const t = o.orderType || 'DINE_IN';
       if (!tm[t]) tm[t] = { orders: 0, amount: 0 };
       tm[t].orders++;
-      tm[t].amount += o.total;
+      tm[t].amount += o.grandTotal ?? o.total;
     }
     const otLabels = { DINE_IN: 'Dine-in', TAKEAWAY: 'Takeaway', DELIVERY: 'Delivery' };
     const orderTypeRows = Object.entries(tm).map(([t, d]) => ({
@@ -2520,7 +2536,7 @@ router.get('/reports/day', async (req, res, next) => {
         grossSales: Math.round(grossSales),
         netSales: Math.round(grossSales - totalDisc),
         discounts: Math.round(totalDisc),
-        deliveryCharges: 0,
+        deliveryCharges: Math.round(totalDelCharges),
         totalRevenue: Math.round(totalRev),
         taxAmount: 0,
         budgetCost: Math.round(budgetCost),
@@ -2598,7 +2614,7 @@ router.get('/dashboard/summary', async (req, res, next) => {
 
     const completedOrders = allTodayOrders.filter(o => o.status === 'DELIVERED');
     const pendingOrders = pendingOrdersList;
-    const todaysRevenue = completedOrders.reduce((s, o) => s + o.total, 0);
+    const todaysRevenue = completedOrders.reduce((s, o) => s + (o.grandTotal ?? o.total), 0);
     const todaysOrdersCount = completedOrders.length;
 
     // Build inventory map for cost calculations
@@ -2636,7 +2652,7 @@ router.get('/dashboard/summary', async (req, res, next) => {
 
     // Hourly sales (0-23)
     const hourlySales = new Array(24).fill(0);
-    for (const o of completedOrders) hourlySales[new Date(o.createdAt).getHours()] += o.total;
+    for (const o of completedOrders) hourlySales[new Date(o.createdAt).getHours()] += o.grandTotal ?? o.total;
 
     // Sales type, payment, and source distribution from last 7 days so charts show data (avoids timezone/today-only empty state)
     const salesTypeDistribution = {};
@@ -2770,15 +2786,61 @@ router.put('/currency/daily', async (req, res, next) => {
 
 // USER MANAGEMENT ROUTES
 
+// @route   GET /api/admin/delivery-riders
+// @desc    List delivery riders for the current branch (or all if no branch context).
+//          Uses x-branch-id header or ?branchId= query param.
+// @access  Restaurant Admin / Admin / Manager / Cashier
+router.get('/delivery-riders', async (req, res, next) => {
+  try {
+    const restaurantId = getRestaurantIdForRequest(req);
+    const branchId = req.query.branchId || getBranchIdForRequest(req);
+
+    const riderQuery = { restaurant: restaurantId, role: 'delivery_rider' };
+    let riders = await User.find(riderQuery).sort({ name: 1 });
+
+    if (branchId) {
+      const branchAssignments = await UserBranch.find({ branch: branchId, role: 'delivery_rider' }).lean();
+      const branchRiderIds = new Set(branchAssignments.map((a) => a.user.toString()));
+      riders = riders.filter((r) => branchRiderIds.has(r._id.toString()));
+    }
+
+    res.json(riders.map((r) => ({
+      id: r._id.toString(),
+      name: r.name,
+      email: r.email,
+      phone: r.phone || '',
+      vehicleType: r.vehicleType || null,
+      profileImageUrl: r.profileImageUrl || null,
+    })));
+  } catch (error) {
+    next(error);
+  }
+});
+
 // @route   GET /api/admin/users
-// @desc    List users for this restaurant (with branch assignments)
+// @desc    List users for this restaurant (with branch assignments).
+//          Optional query params: ?role=delivery_rider&branchId=xxx
 // @access  Restaurant Admin / Super Admin
 router.get('/users', async (req, res, next) => {
   try {
     const restaurantId = getRestaurantIdForRequest(req);
-    const users = await User.find({ restaurant: restaurantId }).sort({ createdAt: -1 });
+    const { role, branchId } = req.query;
 
-    // Load branch assignments for all users
+    const userQuery = { restaurant: restaurantId };
+    if (role) userQuery.role = role;
+
+    let filteredUserIds = null;
+    if (branchId) {
+      const branchAssignments = await UserBranch.find({ branch: branchId }).lean();
+      filteredUserIds = new Set(branchAssignments.map((a) => a.user.toString()));
+    }
+
+    let users = await User.find(userQuery).sort({ createdAt: -1 });
+
+    if (filteredUserIds) {
+      users = users.filter((u) => filteredUserIds.has(u._id.toString()));
+    }
+
     const userIds = users.map((u) => u._id);
     const allAssignments = await UserBranch.find({ user: { $in: userIds } }).populate('branch', 'name').lean();
     const assignmentsByUser = new Map();

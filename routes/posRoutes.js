@@ -890,6 +890,8 @@ router.get('/transactions', async (req, res, next) => {
       deliveryAddress: order.deliveryAddress,
       subtotal: order.subtotal,
       total: order.total,
+      deliveryCharges: order.deliveryCharges ?? 0,
+      grandTotal: order.grandTotal ?? order.total,
       discountAmount: order.discountAmount,
       appliedDeals: order.appliedDeals || [],
       tableNumber: order.tableNumber,
@@ -959,6 +961,8 @@ router.get('/transactions/:id', async (req, res, next) => {
       deliveryAddress: transaction.deliveryAddress,
       subtotal: transaction.subtotal,
       total: transaction.total,
+      deliveryCharges: transaction.deliveryCharges ?? 0,
+      grandTotal: transaction.grandTotal ?? transaction.total,
       discountAmount: transaction.discountAmount,
       appliedDeals: transaction.appliedDeals || [],
       tableNumber: transaction.tableNumber,
@@ -1112,7 +1116,7 @@ router.get('/day-session/current', async (req, res, next) => {
     // Aggregate sales and order count for the active session (exclude cancelled)
     const agg = await Order.aggregate([
       { $match: { daySession: session._id, status: { $nin: ['CANCELLED'] } } },
-      { $group: { _id: null, totalSales: { $sum: '$total' }, totalOrders: { $sum: 1 } } },
+      { $group: { _id: null, totalSales: { $sum: { $ifNull: ['$grandTotal', '$total'] } }, totalOrders: { $sum: 1 } } },
     ]);
     const { totalSales = 0, totalOrders = 0 } = agg[0] || {};
 
@@ -1211,7 +1215,7 @@ router.get('/day-session/list', async (req, res, next) => {
         const orderCount = await Order.countDocuments({ daySession: s._id });
         const totalsAgg = await Order.aggregate([
           { $match: { daySession: s._id, status: { $nin: ['CANCELLED'] } } },
-          { $group: { _id: null, totalSales: { $sum: '$total' }, totalOrders: { $sum: 1 } } },
+          { $group: { _id: null, totalSales: { $sum: { $ifNull: ['$grandTotal', '$total'] } }, totalOrders: { $sum: 1 } } },
         ]);
         const agg = totalsAgg[0] || { totalSales: 0, totalOrders: 0 };
         return {
@@ -1285,12 +1289,13 @@ router.post('/day-session/bulk-orders', async (req, res, next) => {
         {
           $group: {
             _id: null,
-            totalSales: { $sum: '$total' },
+            totalSales: { $sum: { $ifNull: ['$grandTotal', '$total'] } },
             totalOrders: { $sum: 1 },
             totalDiscount: { $sum: '$discountAmount' },
             totalProfit: { $sum: '$profit' },
-            cashSales: { $sum: { $cond: [{ $eq: ['$paymentMethod', 'CASH'] }, '$total', 0] } },
-            cardSales: { $sum: { $cond: [{ $eq: ['$paymentMethod', 'CARD'] }, '$total', 0] } },
+            totalDeliveryCharges: { $sum: { $ifNull: ['$deliveryCharges', 0] } },
+            cashSales: { $sum: { $cond: [{ $eq: ['$paymentMethod', 'CASH'] }, { $ifNull: ['$grandTotal', '$total'] }, 0] } },
+            cardSales: { $sum: { $cond: [{ $eq: ['$paymentMethod', 'CARD'] }, { $ifNull: ['$grandTotal', '$total'] }, 0] } },
           },
         },
       ]),
@@ -1301,6 +1306,7 @@ router.post('/day-session/bulk-orders', async (req, res, next) => {
       totalOrders: 0,
       totalDiscount: 0,
       totalProfit: 0,
+      totalDeliveryCharges: 0,
       cashSales: 0,
       cardSales: 0,
     };
@@ -1318,6 +1324,8 @@ router.post('/day-session/bulk-orders', async (req, res, next) => {
         subtotal: o.subtotal,
         discountAmount: o.discountAmount,
         total: o.total,
+        deliveryCharges: o.deliveryCharges ?? 0,
+        grandTotal: o.grandTotal ?? o.total,
         profit: o.profit,
         createdAt: o.createdAt,
         createdBy: o.createdBy
@@ -1353,16 +1361,17 @@ router.get('/day-session/:sessionId/orders', async (req, res, next) => {
       {
         $group: {
           _id: null,
-          totalSales: { $sum: '$total' },
+          totalSales: { $sum: { $ifNull: ['$grandTotal', '$total'] } },
           totalOrders: { $sum: 1 },
           totalDiscount: { $sum: '$discountAmount' },
           totalProfit: { $sum: '$profit' },
-          cashSales: { $sum: { $cond: [{ $eq: ['$paymentMethod', 'CASH'] }, '$total', 0] } },
-          cardSales: { $sum: { $cond: [{ $eq: ['$paymentMethod', 'CARD'] }, '$total', 0] } },
+          totalDeliveryCharges: { $sum: { $ifNull: ['$deliveryCharges', 0] } },
+          cashSales: { $sum: { $cond: [{ $eq: ['$paymentMethod', 'CASH'] }, { $ifNull: ['$grandTotal', '$total'] }, 0] } },
+          cardSales: { $sum: { $cond: [{ $eq: ['$paymentMethod', 'CARD'] }, { $ifNull: ['$grandTotal', '$total'] }, 0] } },
         },
       },
     ]);
-    const summary = totalsAgg[0] || { totalSales: 0, totalOrders: 0, totalDiscount: 0, totalProfit: 0, cashSales: 0, cardSales: 0 };
+    const summary = totalsAgg[0] || { totalSales: 0, totalOrders: 0, totalDiscount: 0, totalProfit: 0, totalDeliveryCharges: 0, cashSales: 0, cardSales: 0 };
 
     return res.json({
       session: {
@@ -1383,6 +1392,8 @@ router.get('/day-session/:sessionId/orders', async (req, res, next) => {
         subtotal: o.subtotal,
         discountAmount: o.discountAmount,
         total: o.total,
+        deliveryCharges: o.deliveryCharges ?? 0,
+        grandTotal: o.grandTotal ?? o.total,
         profit: o.profit,
         createdAt: o.createdAt,
         createdBy: o.createdBy ? { id: o.createdBy._id?.toString(), name: o.createdBy.name } : null,
