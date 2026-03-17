@@ -336,6 +336,15 @@ router.post('/orders', async (req, res, next) => {
 
     const session = await getOrCreateCurrentSession(req.restaurant._id, branch, req.user.id);
 
+    // Auto-assign rider when a delivery_rider creates the order
+    const isRiderCreated = req.user.role === 'delivery_rider' && orderType === 'DELIVERY';
+    const riderFields = {};
+    if (isRiderCreated) {
+      riderFields.assignedRiderId = req.user.id;
+      riderFields.assignedRiderName = req.user.name || '';
+      riderFields.assignedRiderPhone = req.user.phone || '';
+    }
+
     const order = await Order.create({
       restaurant: req.restaurant._id,
       branch: branch ? branch._id : undefined,
@@ -347,8 +356,6 @@ router.post('/orders', async (req, res, next) => {
       orderType,
       paymentMethod: orderPaymentMethod,
       paymentProvider: orderPaymentMethod === 'ONLINE' && paymentProvider ? String(paymentProvider).trim() : undefined,
-      // Always start as NEW_ORDER so order flows through kitchen,
-      // even when payment is captured at creation.
       status: 'NEW_ORDER',
       paymentAmountReceived: paymentAmountReceived ?? undefined,
       paymentAmountReturned: paymentAmountReturned ?? undefined,
@@ -363,6 +370,7 @@ router.post('/orders', async (req, res, next) => {
       customerPhone: customerPhone || '',
       deliveryAddress: deliveryAddress || '',
       orderNumber: await generateOrderNumber(req.restaurant._id, branch ? branch._id : null, 'ORD'),
+      ...riderFields,
     });
 
     const io = req.app.get('io');
