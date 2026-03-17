@@ -19,7 +19,7 @@ const { getOrderRooms } = require('../utils/socketRooms');
 
 const router = express.Router();
 
-// Allow restaurant owner and staff roles to access tenant admin APIs
+// Allow restaurant owner and staff roles to access tenant admin APIs (delivery_rider for menu/order creation)
 router.use(
   protect,
   requireRole(
@@ -30,7 +30,8 @@ router.use(
     'cashier',
     'manager',
     'kitchen_staff',
-    'order_taker'
+    'order_taker',
+    'delivery_rider'
   )
 );
 
@@ -416,13 +417,16 @@ const mapCustomer = (customer) => ({
 const mapOrder = (order) => {
   const paymentLabels = { PENDING: 'To be paid', CASH: 'Cash', CARD: 'Card', ONLINE: 'Online', OTHER: 'Other' };
   const rawCustomerName = order.customerName || '';
-  const orderTakerName = (order.createdBy && typeof order.createdBy === 'object' && order.createdBy.name) ? order.createdBy.name : '';
+  const createdByObj = order.createdBy && typeof order.createdBy === 'object' ? order.createdBy : null;
+  const orderTakerName = createdByObj && createdByObj.name ? createdByObj.name : '';
+  const createdByRole = createdByObj && createdByObj.role ? createdByObj.role : null;
 
   return {
     id: order.orderNumber || order._id.toString(),
     _id: order._id.toString(),
     customerName: rawCustomerName,
     orderTakerName,
+    createdByRole,
     customerPhone: order.customerPhone || '',
     deliveryAddress: order.deliveryAddress || '',
     tableNumber: order.tableNumber || '',
@@ -640,7 +644,7 @@ router.get('/orders', async (req, res, next) => {
 
     const [orders, total] = await Promise.all([
       Order.find(query)
-        .populate('createdBy', 'name')
+        .populate('createdBy', 'name role')
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit),
@@ -663,10 +667,10 @@ router.get('/orders/:id', async (req, res, next) => {
 
     let order = null;
     if (id.match(/^[0-9a-fA-F]{24}$/)) {
-      order = await Order.findOne({ _id: id, restaurant: restaurantId }).populate('createdBy', 'name');
+      order = await Order.findOne({ _id: id, restaurant: restaurantId }).populate('createdBy', 'name role');
     }
     if (!order) {
-      order = await Order.findOne({ orderNumber: id, restaurant: restaurantId }).populate('createdBy', 'name');
+      order = await Order.findOne({ orderNumber: id, restaurant: restaurantId }).populate('createdBy', 'name role');
     }
     if (!order) {
       return res.status(404).json({ message: 'Order not found' });
@@ -748,7 +752,7 @@ router.put('/orders/:id', async (req, res, next) => {
     if (tableName !== undefined) order.tableName = String(tableName || '').trim();
 
     await order.save();
-    const updated = await Order.findById(order._id).populate('createdBy', 'name');
+    const updated = await Order.findById(order._id).populate('createdBy', 'name role');
     res.json(mapOrder(updated));
   } catch (error) {
     next(error);
@@ -774,10 +778,10 @@ router.put('/orders/:id/status', async (req, res, next) => {
     // Try finding by _id first, then by orderNumber
     let order;
     if (id.match(/^[0-9a-fA-F]{24}$/)) {
-      order = await Order.findOne({ _id: id, restaurant: restaurantId }).populate('createdBy', 'name');
+      order = await Order.findOne({ _id: id, restaurant: restaurantId }).populate('createdBy', 'name role');
     }
     if (!order) {
-      order = await Order.findOne({ orderNumber: id, restaurant: restaurantId }).populate('createdBy', 'name');
+      order = await Order.findOne({ orderNumber: id, restaurant: restaurantId }).populate('createdBy', 'name role');
     }
     if (!order) {
       return res.status(404).json({ message: 'Order not found' });
@@ -845,10 +849,10 @@ router.put('/orders/:id/payment', async (req, res, next) => {
 
     let order;
     if (id.match(/^[0-9a-fA-F]{24}$/)) {
-      order = await Order.findOne({ _id: id, restaurant: restaurantId }).populate('createdBy', 'name');
+      order = await Order.findOne({ _id: id, restaurant: restaurantId }).populate('createdBy', 'name role');
     }
     if (!order) {
-      order = await Order.findOne({ orderNumber: id, restaurant: restaurantId }).populate('createdBy', 'name');
+      order = await Order.findOne({ orderNumber: id, restaurant: restaurantId }).populate('createdBy', 'name role');
     }
     if (!order) {
       return res.status(404).json({ message: 'Order not found' });
@@ -927,10 +931,10 @@ router.put('/orders/:id/assign-rider', async (req, res, next) => {
 
     let order;
     if (riderId && /^[0-9a-fA-F]{24}$/.test(req.params.id)) {
-      order = await Order.findOne({ _id: req.params.id, restaurant: restaurantId }).populate('createdBy', 'name');
+      order = await Order.findOne({ _id: req.params.id, restaurant: restaurantId }).populate('createdBy', 'name role');
     }
     if (!order) {
-      order = await Order.findOne({ orderNumber: req.params.id, restaurant: restaurantId }).populate('createdBy', 'name');
+      order = await Order.findOne({ orderNumber: req.params.id, restaurant: restaurantId }).populate('createdBy', 'name role');
     }
     if (!order) {
       return res.status(404).json({ message: 'Order not found' });
@@ -983,10 +987,10 @@ router.put('/orders/:id/collect-payment', async (req, res, next) => {
 
     let order;
     if (/^[0-9a-fA-F]{24}$/.test(req.params.id)) {
-      order = await Order.findOne({ _id: req.params.id, restaurant: restaurantId }).populate('createdBy', 'name');
+      order = await Order.findOne({ _id: req.params.id, restaurant: restaurantId }).populate('createdBy', 'name role');
     }
     if (!order) {
-      order = await Order.findOne({ orderNumber: req.params.id, restaurant: restaurantId }).populate('createdBy', 'name');
+      order = await Order.findOne({ orderNumber: req.params.id, restaurant: restaurantId }).populate('createdBy', 'name role');
     }
     if (!order) {
       return res.status(404).json({ message: 'Order not found' });
@@ -3273,7 +3277,7 @@ router.get('/kitchen/orders', async (req, res, next) => {
     if (branchId) query.branch = branchId;
 
     const orders = await Order.find(query)
-      .populate('createdBy', 'name')
+      .populate('createdBy', 'name role')
       .sort({ createdAt: 1 })
       .lean();
 

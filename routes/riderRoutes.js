@@ -2,6 +2,8 @@ const express = require('express');
 const Order = require('../models/Order');
 const User = require('../models/User');
 const Restaurant = require('../models/Restaurant');
+const Category = require('../models/Category');
+const MenuItem = require('../models/MenuItem');
 const { protect, requireRole } = require('../middleware/authMiddleware');
 const { getOrderRooms } = require('../utils/socketRooms');
 
@@ -77,6 +79,47 @@ router.get('/me', async (req, res, next) => {
       vehicleType: user.vehicleType || null,
       profileImageUrl: user.profileImageUrl || null,
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @route   GET /api/rider/menu
+// @desc    Get menu (categories + items) for rider to create delivery orders. No branch scope.
+// @access  delivery_rider
+router.get('/menu', async (req, res, next) => {
+  try {
+    const restaurantId = req.restaurant ? req.restaurant._id : req.user.restaurant;
+    if (!restaurantId) {
+      return res.status(400).json({ message: 'Restaurant context missing' });
+    }
+
+    // Include both restaurant-level (branch null) and any branch-level menu so riders see full catalog
+    const [categories, items] = await Promise.all([
+      Category.find({ restaurant: restaurantId }).sort({ createdAt: 1 }),
+      MenuItem.find({ restaurant: restaurantId, available: true }),
+    ]);
+
+    const categoriesPayload = categories.map((c) => ({
+      id: c._id.toString(),
+      _id: c._id.toString(),
+      name: c.name,
+      description: c.description || '',
+    }));
+
+    const itemsPayload = items.map((item) => ({
+      id: item._id.toString(),
+      _id: item._id.toString(),
+      name: item.name,
+      price: item.price,
+      finalPrice: item.price,
+      categoryId: item.category ? item.category.toString() : null,
+      available: item.available,
+      finalAvailable: item.available,
+      imageUrl: item.imageUrl || '',
+    }));
+
+    res.json({ categories: categoriesPayload, items: itemsPayload });
   } catch (error) {
     next(error);
   }

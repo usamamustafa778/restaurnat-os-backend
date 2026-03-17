@@ -31,7 +31,7 @@ async function getOrCreateCurrentSession(restaurantId, branch, userId) {
 
 const router = express.Router();
 
-router.use(protect, requireRole('super_admin', 'staff', 'restaurant_admin', 'admin', 'cashier', 'manager', 'product_manager', 'kitchen_staff', 'order_taker'), requireRestaurant, checkSubscriptionStatus);
+router.use(protect, requireRole('super_admin', 'staff', 'restaurant_admin', 'admin', 'cashier', 'manager', 'product_manager', 'kitchen_staff', 'order_taker', 'delivery_rider'), requireRestaurant, checkSubscriptionStatus);
 
 // Cost per single unit of a menu item from inventory consumptions (costPrice per 1000g/1000ml/12pc)
 function getMenuItemIngredientCost(menuItem, inventoryMap) {
