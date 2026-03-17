@@ -466,6 +466,7 @@ const mapOrder = (order) => {
     assignedRiderId: order.assignedRiderId ? order.assignedRiderId.toString() : null,
     assignedRiderName: order.assignedRiderName || '',
     assignedRiderPhone: order.assignedRiderPhone || '',
+    updatedAt: order.updatedAt || null,
     cancelReason: order.cancelReason || null,
     cancelledAt: order.cancelledAt || null,
     cancelledBy: order.cancelledBy ? order.cancelledBy.toString() : null,
