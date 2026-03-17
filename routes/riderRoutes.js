@@ -86,7 +86,7 @@ router.get('/me', async (req, res, next) => {
 });
 
 // @route   GET /api/rider/customers
-// @desc    Search customers by name or phone for autofill
+// @desc    List / search customers for autofill. Without ?q returns all (up to 500).
 // @access  delivery_rider
 router.get('/customers', async (req, res, next) => {
   try {
@@ -95,18 +95,11 @@ router.get('/customers', async (req, res, next) => {
       return res.status(400).json({ message: 'Restaurant context missing' });
     }
 
-    const q = (req.query.q || '').trim();
-    if (!q) return res.json([]);
+    const query = { restaurant: restaurantId };
 
-    const escaped = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const regex = new RegExp(escaped, 'i');
-
-    const customers = await Customer.find({
-      restaurant: restaurantId,
-      $or: [{ name: regex }, { phone: regex }],
-    })
+    const customers = await Customer.find(query)
       .sort({ lastOrderAt: -1, createdAt: -1 })
-      .limit(20)
+      .limit(500)
       .lean();
 
     res.json(
@@ -117,6 +110,40 @@ router.get('/customers', async (req, res, next) => {
         address: c.address || '',
       }))
     );
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @route   POST /api/rider/customers
+// @desc    Quick-add a new customer from the rider flow
+// @access  delivery_rider
+router.post('/customers', async (req, res, next) => {
+  try {
+    const restaurantId = req.restaurant ? req.restaurant._id : req.user.restaurant;
+    if (!restaurantId) {
+      return res.status(400).json({ message: 'Restaurant context missing' });
+    }
+
+    const { name, phone, address } = req.body;
+    if (!name || !phone) {
+      return res.status(400).json({ message: 'Name and phone are required' });
+    }
+
+    const customer = await Customer.create({
+      restaurant: restaurantId,
+      branch: null,
+      name: name.trim(),
+      phone: phone.trim(),
+      address: (address || '').trim(),
+    });
+
+    res.status(201).json({
+      id: customer._id.toString(),
+      name: customer.name,
+      phone: customer.phone,
+      address: customer.address || '',
+    });
   } catch (error) {
     next(error);
   }
