@@ -245,6 +245,50 @@ router.get('/orders', async (req, res, next) => {
   }
 });
 
+// @route   PUT /api/rider/orders/:id/collect
+// @desc    Rider picks up a READY order → status becomes OUT_FOR_DELIVERY, rider is assigned
+// @access  delivery_rider
+router.put('/orders/:id/collect', async (req, res, next) => {
+  try {
+    const restaurantId = req.restaurant ? req.restaurant._id : req.user.restaurant;
+    if (!restaurantId) {
+      return res.status(400).json({ message: 'Restaurant context missing' });
+    }
+
+    let order;
+    if (/^[0-9a-fA-F]{24}$/.test(req.params.id)) {
+      order = await Order.findOne({ _id: req.params.id, restaurant: restaurantId });
+    }
+    if (!order) {
+      order = await Order.findOne({ orderNumber: req.params.id, restaurant: restaurantId });
+    }
+    if (!order) {
+      return res.status(404).json({ message: 'Order not found' });
+    }
+
+    if (order.status !== 'READY') {
+      return res.status(400).json({ message: `Order must be READY to collect (current: ${order.status})` });
+    }
+
+    order.status = 'OUT_FOR_DELIVERY';
+    order.assignedRiderId = req.user.id;
+    order.assignedRiderName = req.user.name || '';
+    order.assignedRiderPhone = req.user.phone || '';
+    await order.save();
+
+    const io = req.app.get('io');
+    if (io) {
+      const rooms = getOrderRooms(order.restaurant, order.branch);
+      const payload = { id: order._id.toString(), orderNumber: order.orderNumber, status: order.status, assignedRiderId: req.user.id, assignedRiderName: req.user.name || '' };
+      rooms.forEach((room) => io.to(room).emit('order:updated', payload));
+    }
+
+    res.json(mapRiderOrder(order));
+  } catch (error) {
+    next(error);
+  }
+});
+
 // @route   PUT /api/rider/orders/:id/delivered
 // @desc    Rider marks their assigned order as DELIVERED
 // @access  delivery_rider
