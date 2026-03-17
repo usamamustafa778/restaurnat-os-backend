@@ -2,6 +2,7 @@ const express = require('express');
 const Order = require('../models/Order');
 const User = require('../models/User');
 const Restaurant = require('../models/Restaurant');
+const Customer = require('../models/Customer');
 const Category = require('../models/Category');
 const MenuItem = require('../models/MenuItem');
 const { protect, requireRole } = require('../middleware/authMiddleware');
@@ -79,6 +80,43 @@ router.get('/me', async (req, res, next) => {
       vehicleType: user.vehicleType || null,
       profileImageUrl: user.profileImageUrl || null,
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @route   GET /api/rider/customers
+// @desc    Search customers by name or phone for autofill
+// @access  delivery_rider
+router.get('/customers', async (req, res, next) => {
+  try {
+    const restaurantId = req.restaurant ? req.restaurant._id : req.user.restaurant;
+    if (!restaurantId) {
+      return res.status(400).json({ message: 'Restaurant context missing' });
+    }
+
+    const q = (req.query.q || '').trim();
+    if (!q) return res.json([]);
+
+    const escaped = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const regex = new RegExp(escaped, 'i');
+
+    const customers = await Customer.find({
+      restaurant: restaurantId,
+      $or: [{ name: regex }, { phone: regex }],
+    })
+      .sort({ lastOrderAt: -1, createdAt: -1 })
+      .limit(20)
+      .lean();
+
+    res.json(
+      customers.map((c) => ({
+        id: c._id.toString(),
+        name: c.name,
+        phone: c.phone,
+        address: c.address || '',
+      }))
+    );
   } catch (error) {
     next(error);
   }
