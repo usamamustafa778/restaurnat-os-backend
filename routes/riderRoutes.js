@@ -216,7 +216,7 @@ router.get('/menu', async (req, res, next) => {
 });
 
 // @route   GET /api/rider/orders
-// @desc    Get orders assigned to the authenticated rider
+// @desc    Get orders assigned to OR created by the authenticated rider
 // @access  delivery_rider
 router.get('/orders', async (req, res, next) => {
   try {
@@ -225,18 +225,18 @@ router.get('/orders', async (req, res, next) => {
       return res.status(400).json({ message: 'Restaurant context missing' });
     }
 
+    const statusFilter = req.query.status
+      ? req.query.status
+      : { $in: ['NEW_ORDER', 'PREPARING', 'READY', 'OUT_FOR_DELIVERY', 'DELIVERED'] };
+
     const filter = {
       restaurant: restaurantId,
-      assignedRiderId: req.user.id,
+      $or: [
+        { assignedRiderId: req.user.id },
+        { createdBy: req.user.id },
+      ],
+      status: statusFilter,
     };
-
-    // Optionally filter by status via ?status=OUT_FOR_DELIVERY
-    if (req.query.status) {
-      filter.status = req.query.status;
-    } else {
-      // By default return active (non-cancelled) assigned orders
-      filter.status = { $in: ['OUT_FOR_DELIVERY', 'DELIVERED'] };
-    }
 
     const orders = await Order.find(filter).sort({ createdAt: -1 }).limit(100);
     res.json(orders.map(mapRiderOrder));
