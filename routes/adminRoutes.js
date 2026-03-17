@@ -628,13 +628,26 @@ router.get('/orders', async (req, res, next) => {
     if (req.query.mine === 'true') {
       query.createdBy = req.user.id;
     }
+    if (req.query.from || req.query.to) {
+      query.createdAt = {};
+      if (req.query.from) query.createdAt.$gte = new Date(req.query.from);
+      if (req.query.to) query.createdAt.$lte = new Date(req.query.to);
+    }
 
-    const orders = await Order.find(query)
-      .populate('createdBy', 'name')
-      .sort({ createdAt: -1 })
-      .limit(200);
+    const limit = Math.min(parseInt(req.query.limit) || 200, 2000);
+    const page = Math.max(parseInt(req.query.page) || 1, 1);
+    const skip = (page - 1) * limit;
 
-    res.json(orders.map(mapOrder));
+    const [orders, total] = await Promise.all([
+      Order.find(query)
+        .populate('createdBy', 'name')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit),
+      Order.countDocuments(query),
+    ]);
+
+    res.json({ orders: orders.map(mapOrder), total, page, limit, totalPages: Math.ceil(total / limit) });
   } catch (error) {
     next(error);
   }
