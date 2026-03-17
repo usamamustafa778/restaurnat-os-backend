@@ -189,6 +189,13 @@ const orderSchema = new mongoose.Schema(
       ref: 'User',
       default: null,
     },
+    statusHistory: [
+      {
+        status: { type: String, required: true },
+        at: { type: Date, default: Date.now },
+        _id: false,
+      },
+    ],
     ingredientCost: {
       type: Number,
       min: 0,

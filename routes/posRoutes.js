@@ -357,6 +357,7 @@ router.post('/orders', async (req, res, next) => {
       paymentMethod: orderPaymentMethod,
       paymentProvider: orderPaymentMethod === 'ONLINE' && paymentProvider ? String(paymentProvider).trim() : undefined,
       status: 'NEW_ORDER',
+      statusHistory: [{ status: 'NEW_ORDER', at: new Date() }],
       paymentAmountReceived: paymentAmountReceived ?? undefined,
       paymentAmountReturned: paymentAmountReturned ?? undefined,
       items: orderItems,
@@ -467,6 +468,8 @@ router.post('/orders/:id/cancel', async (req, res, next) => {
     }
     order.cancelledAt = new Date();
     order.cancelledBy = req.user.id;
+    if (!order.statusHistory) order.statusHistory = [];
+    order.statusHistory.push({ status: 'CANCELLED', at: new Date() });
     await order.save();
 
     res.json({

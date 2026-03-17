@@ -466,6 +466,7 @@ const mapOrder = (order) => {
     assignedRiderId: order.assignedRiderId ? order.assignedRiderId.toString() : null,
     assignedRiderName: order.assignedRiderName || '',
     assignedRiderPhone: order.assignedRiderPhone || '',
+    statusHistory: (order.statusHistory || []).map((h) => ({ status: h.status, at: h.at })),
     updatedAt: order.updatedAt || null,
     cancelReason: order.cancelReason || null,
     cancelledAt: order.cancelledAt || null,
@@ -794,6 +795,8 @@ router.put('/orders/:id/status', async (req, res, next) => {
     }
 
     order.status = status;
+    if (!order.statusHistory) order.statusHistory = [];
+    order.statusHistory.push({ status, at: new Date() });
 
     if (status === 'CANCELLED') {
       if (cancelReason && String(cancelReason).trim()) {
@@ -887,6 +890,8 @@ router.put('/orders/:id/payment', async (req, res, next) => {
     order.paymentAmountReturned = returned;
     if (!wasAlreadyDelivered) {
       order.status = 'DELIVERED';
+      if (!order.statusHistory) order.statusHistory = [];
+      order.statusHistory.push({ status: 'DELIVERED', at: new Date() });
     }
     await order.save();
 
@@ -960,6 +965,8 @@ router.put('/orders/:id/assign-rider', async (req, res, next) => {
     order.deliveryCharges = Math.max(0, Number(deliveryCharges) || 0);
     order.grandTotal = order.total + order.deliveryCharges;
     order.status = 'OUT_FOR_DELIVERY';
+    if (!order.statusHistory) order.statusHistory = [];
+    order.statusHistory.push({ status: 'OUT_FOR_DELIVERY', at: new Date() });
     await order.save();
 
     const io = req.app.get('io');
@@ -3349,6 +3356,8 @@ router.put('/kitchen/orders/:id/status', async (req, res, next) => {
     }
 
     order.status = status;
+    if (!order.statusHistory) order.statusHistory = [];
+    order.statusHistory.push({ status, at: new Date() });
 
     if (status === 'CANCELLED') {
       if (cancelReason && String(cancelReason).trim()) {

@@ -274,6 +274,8 @@ router.put('/orders/:id/collect', async (req, res, next) => {
     order.assignedRiderId = req.user.id;
     order.assignedRiderName = req.user.name || '';
     order.assignedRiderPhone = req.user.phone || '';
+    if (!order.statusHistory) order.statusHistory = [];
+    order.statusHistory.push({ status: 'OUT_FOR_DELIVERY', at: new Date() });
     await order.save();
 
     const io = req.app.get('io');
@@ -321,6 +323,8 @@ router.put('/orders/:id/delivered', async (req, res, next) => {
     }
 
     order.status = 'DELIVERED';
+    if (!order.statusHistory) order.statusHistory = [];
+    order.statusHistory.push({ status: 'DELIVERED', at: new Date() });
     await order.save();
 
     const io = req.app.get('io');
