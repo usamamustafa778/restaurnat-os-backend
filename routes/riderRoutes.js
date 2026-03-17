@@ -2,6 +2,7 @@ const express = require('express');
 const Order = require('../models/Order');
 const User = require('../models/User');
 const Restaurant = require('../models/Restaurant');
+const Branch = require('../models/Branch');
 const Customer = require('../models/Customer');
 const Category = require('../models/Category');
 const MenuItem = require('../models/MenuItem');
@@ -79,6 +80,30 @@ router.get('/me', async (req, res, next) => {
       role: user.role,
       vehicleType: user.vehicleType || null,
       profileImageUrl: user.profileImageUrl || null,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @route   GET /api/rider/branches
+// @desc    List active branches so rider can select one when placing orders
+// @access  delivery_rider
+router.get('/branches', async (req, res, next) => {
+  try {
+    const restaurantId = req.restaurant ? req.restaurant._id : req.user.restaurant;
+    if (!restaurantId) {
+      return res.status(400).json({ message: 'Restaurant context missing' });
+    }
+    const branches = await Branch.find({ restaurant: restaurantId, isDeleted: { $ne: true } })
+      .sort({ sortOrder: 1, createdAt: 1 })
+      .lean();
+    res.json({
+      branches: branches.map((b) => ({
+        id: b._id.toString(),
+        name: b.name,
+        address: b.address || '',
+      })),
     });
   } catch (error) {
     next(error);
