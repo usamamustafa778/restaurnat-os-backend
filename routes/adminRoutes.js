@@ -2268,13 +2268,22 @@ router.get('/reports/sales', async (req, res, next) => {
       toDate = new Date();
     }
 
-    const orderFilter = {
+    const allOrderFilter = {
       restaurant: restaurantId,
-      status: { $in: ['DELIVERED', 'COMPLETED'] },
       createdAt: { $gte: fromDate, $lte: toDate },
     };
-    if (branchId) orderFilter.branch = branchId;
-    const orders = await Order.find(orderFilter);
+    if (branchId) allOrderFilter.branch = branchId;
+
+    const reservationFilter = { restaurant: restaurantId, date: { $gte: fromDate, $lte: toDate } };
+    if (branchId) reservationFilter.branch = branchId;
+
+    const [allOrders, periodReservations] = await Promise.all([
+      Order.find(allOrderFilter),
+      Reservation.find(reservationFilter).lean(),
+    ]);
+
+    const orders = allOrders.filter(o => ['DELIVERED', 'COMPLETED'].includes(o.status));
+    const cancelledOrders = allOrders.filter(o => o.status === 'CANCELLED');
 
     let totalRevenue = 0;
     let totalProfit = 0;
@@ -2444,6 +2453,99 @@ router.get('/reports/sales', async (req, res, next) => {
     }));
     payload.paymentAccountRows = paymentAccountRows;
     if (hourlySales) payload.hourlySales = hourlySales;
+
+    // Table breakdown (completed orders by table)
+    const tableMap = {};
+    for (const order of orders) {
+      const tn = order.tableName || '';
+      if (tn) {
+        if (!tableMap[tn]) tableMap[tn] = { tableName: tn, orders: 0, amount: 0 };
+        tableMap[tn].orders += 1;
+        tableMap[tn].amount += order.grandTotal ?? order.total;
+      }
+    }
+    payload.tableBreakdown = Object.values(tableMap).sort((a, b) => b.amount - a.amount);
+
+    // Cancelled orders summary
+    payload.cancelledSummary = {
+      count: cancelledOrders.length,
+      amount: Math.round(cancelledOrders.reduce((s, o) => s + (o.grandTotal ?? o.total), 0)),
+      orders: cancelledOrders.slice(0, 200).map(o => ({
+        id: o._id.toString(),
+        orderNumber: o.orderNumber,
+        amount: o.grandTotal ?? o.total,
+        status: o.status,
+        orderType: o.orderType,
+        paymentMethod: o.paymentMethod || 'PENDING',
+        cancelReason: o.cancelReason || '',
+        cancelledAt: o.cancelledAt,
+        createdAt: o.createdAt,
+        customerName: o.customerName || '',
+        tableName: o.tableName || '',
+      })),
+    };
+
+    // Per order-type detailed breakdown
+    const typeDetails = {};
+    for (const order of orders) {
+      const t = order.orderType || 'DINE_IN';
+      if (!typeDetails[t]) typeDetails[t] = { type: t, orders: 0, amount: 0, itemCount: 0, topItems: {}, deliveryCharges: 0 };
+      typeDetails[t].orders += 1;
+      typeDetails[t].amount += order.grandTotal ?? order.total;
+      typeDetails[t].deliveryCharges += order.deliveryCharges || 0;
+      for (const item of order.items) {
+        typeDetails[t].itemCount += item.quantity;
+        const nm = item.name;
+        if (!typeDetails[t].topItems[nm]) typeDetails[t].topItems[nm] = { name: nm, quantity: 0, revenue: 0 };
+        typeDetails[t].topItems[nm].quantity += item.quantity;
+        typeDetails[t].topItems[nm].revenue += item.lineTotal;
+      }
+    }
+    for (const key in typeDetails) {
+      typeDetails[key].topItems = Object.values(typeDetails[key].topItems).sort((a, b) => b.quantity - a.quantity).slice(0, 10);
+      typeDetails[key].avgAmount = typeDetails[key].orders > 0 ? Math.round(typeDetails[key].amount / typeDetails[key].orders) : 0;
+    }
+    payload.typeDetails = typeDetails;
+
+    // Reservation summary
+    const reservationSummary = {
+      total: periodReservations.length,
+      totalGuests: periodReservations.reduce((s, r) => s + (r.guestCount || 0), 0),
+      byStatus: {},
+      reservations: periodReservations.slice(0, 100).map(r => ({
+        id: r._id.toString(),
+        customerName: r.customerName,
+        customerPhone: r.customerPhone,
+        date: r.date,
+        time: r.time,
+        guestCount: r.guestCount,
+        tableNumber: r.tableNumber || '',
+        status: r.status,
+      })),
+    };
+    for (const r of periodReservations) {
+      const st = r.status || 'pending';
+      reservationSummary.byStatus[st] = (reservationSummary.byStatus[st] || 0) + 1;
+    }
+    payload.reservationSummary = reservationSummary;
+
+    // Completed (closed) orders summary
+    payload.completedSummary = {
+      count: orders.length,
+      amount: Math.round(totalRevenue),
+      orders: orders.slice(0, 200).map(o => ({
+        id: o._id.toString(),
+        orderNumber: o.orderNumber,
+        amount: o.grandTotal ?? o.total,
+        status: o.status,
+        orderType: o.orderType,
+        paymentMethod: o.paymentMethod || 'CASH',
+        customerName: o.customerName || '',
+        tableName: o.tableName || '',
+        createdAt: o.createdAt,
+      })),
+    };
+
     res.json(payload);
   } catch (error) {
     next(error);
