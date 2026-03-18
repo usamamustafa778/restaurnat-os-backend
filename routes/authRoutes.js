@@ -137,8 +137,8 @@ router.post('/login', async (req, res, next) => {
       if (restaurant?.website?.subdomain) {
         restaurantSlug = restaurant.website.subdomain;
       }
-      restaurantName = restaurant?.name || null;
-      restaurantLogoUrl = restaurant?.logoUrl || null;
+      restaurantName = restaurant?.website?.name || null;
+      restaurantLogoUrl = restaurant?.settings?.restaurantLogoUrl || restaurant?.website?.logoUrl || null;
       const branchCtx = await getBranchContext(
         { id: user._id.toString(), role: user.role },
         user.restaurant
@@ -369,8 +369,8 @@ router.post('/verify-email', async (req, res, next) => {
       if (restaurant?.website?.subdomain) {
         restaurantSlug = restaurant.website.subdomain;
       }
-      restaurantName = restaurant?.name || null;
-      restaurantLogoUrl = restaurant?.logoUrl || null;
+      restaurantName = restaurant?.website?.name || null;
+      restaurantLogoUrl = restaurant?.settings?.restaurantLogoUrl || restaurant?.website?.logoUrl || null;
       const branchCtx = await getBranchContext(
         { id: user._id.toString(), role: user.role },
         user.restaurant,
@@ -502,8 +502,8 @@ router.post('/refresh', async (req, res, next) => {
     if (user.restaurant) {
       const rest = await Restaurant.findById(user.restaurant);
       if (rest?.website?.subdomain) tenantSlug = rest.website.subdomain;
-      restaurantName = rest?.name || null;
-      restaurantLogoUrl = rest?.logoUrl || null;
+      restaurantName = rest?.website?.name || null;
+      restaurantLogoUrl = rest?.settings?.restaurantLogoUrl || rest?.website?.logoUrl || null;
       const branchCtx = await getBranchContext(
         { id: user._id.toString(), role: user.role },
         user.restaurant
