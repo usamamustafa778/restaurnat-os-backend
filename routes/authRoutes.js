@@ -128,6 +128,8 @@ router.post('/login', async (req, res, next) => {
 
     // Resolve restaurant to expose tenant slug (subdomain) for dashboard routing
     let restaurantSlug = null;
+    let restaurantName = null;
+    let restaurantLogoUrl = null;
     let defaultBranchId = null;
     let allowedBranchIds = [];
     if (user.restaurant) {
@@ -135,6 +137,8 @@ router.post('/login', async (req, res, next) => {
       if (restaurant?.website?.subdomain) {
         restaurantSlug = restaurant.website.subdomain;
       }
+      restaurantName = restaurant?.name || null;
+      restaurantLogoUrl = restaurant?.logoUrl || null;
       const branchCtx = await getBranchContext(
         { id: user._id.toString(), role: user.role },
         user.restaurant
@@ -157,6 +161,8 @@ router.post('/login', async (req, res, next) => {
         role: user.role,
         restaurant: user.restaurant,
         restaurantSlug,
+        restaurantName,
+        restaurantLogoUrl,
         defaultBranchId,
         allowedBranchIds,
       },
@@ -354,6 +360,8 @@ router.post('/verify-email', async (req, res, next) => {
 
     // Issue tokens like login
     let restaurantSlug = null;
+    let restaurantName = null;
+    let restaurantLogoUrl = null;
     let defaultBranchId = null;
     let allowedBranchIds = [];
     if (user.restaurant) {
@@ -361,6 +369,8 @@ router.post('/verify-email', async (req, res, next) => {
       if (restaurant?.website?.subdomain) {
         restaurantSlug = restaurant.website.subdomain;
       }
+      restaurantName = restaurant?.name || null;
+      restaurantLogoUrl = restaurant?.logoUrl || null;
       const branchCtx = await getBranchContext(
         { id: user._id.toString(), role: user.role },
         user.restaurant,
@@ -382,6 +392,8 @@ router.post('/verify-email', async (req, res, next) => {
         role: user.role,
         restaurant: user.restaurant,
         restaurantSlug,
+        restaurantName,
+        restaurantLogoUrl,
         defaultBranchId,
         allowedBranchIds,
       },
@@ -483,11 +495,15 @@ router.post('/refresh', async (req, res, next) => {
     }
 
     let tenantSlug = null;
+    let restaurantName = null;
+    let restaurantLogoUrl = null;
     let defaultBranchId = null;
     let allowedBranchIds = [];
     if (user.restaurant) {
       const rest = await Restaurant.findById(user.restaurant);
       if (rest?.website?.subdomain) tenantSlug = rest.website.subdomain;
+      restaurantName = rest?.name || null;
+      restaurantLogoUrl = rest?.logoUrl || null;
       const branchCtx = await getBranchContext(
         { id: user._id.toString(), role: user.role },
         user.restaurant
@@ -510,6 +526,8 @@ router.post('/refresh', async (req, res, next) => {
             role: user.role,
             restaurant: user.restaurant,
             restaurantSlug: tenantSlug,
+            restaurantName,
+            restaurantLogoUrl,
             defaultBranchId,
             allowedBranchIds,
           }
