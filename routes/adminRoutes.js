@@ -14,6 +14,7 @@ const Table = require('../models/Table');
 const Reservation = require('../models/Reservation');
 const DailyCurrency = require('../models/DailyCurrency');
 const PaymentAccount = require('../models/PaymentAccount');
+const DaySession = require('../models/DaySession');
 const { protect, requireRole, requireRestaurant, checkSubscriptionStatus, resolveBranch } = require('../middleware/authMiddleware');
 const { getOrderRooms } = require('../utils/socketRooms');
 
@@ -463,9 +464,18 @@ const mapOrder = (order) => {
     paymentProvider: order.paymentProvider ?? null,
     deliveryCharges: order.deliveryCharges ?? 0,
     deliveryPaymentCollected: order.deliveryPaymentCollected ?? false,
-    assignedRiderId: order.assignedRiderId ? order.assignedRiderId.toString() : null,
-    assignedRiderName: order.assignedRiderName || '',
-    assignedRiderPhone: order.assignedRiderPhone || '',
+    // assignedRiderId/Name/Phone may be either stored fields or populated.
+    assignedRiderId: order.assignedRiderId
+      ? typeof order.assignedRiderId === 'object'
+        ? order.assignedRiderId._id?.toString?.() || null
+        : order.assignedRiderId.toString()
+      : null,
+    assignedRiderName:
+      order.assignedRiderName ||
+      (order.assignedRiderId && typeof order.assignedRiderId === 'object' ? order.assignedRiderId.name || '' : ''),
+    assignedRiderPhone:
+      order.assignedRiderPhone ||
+      (order.assignedRiderId && typeof order.assignedRiderId === 'object' ? order.assignedRiderId.phone || '' : ''),
     statusHistory: (order.statusHistory || []).map((h) => ({ status: h.status, at: h.at })),
     updatedAt: order.updatedAt || null,
     cancelReason: order.cancelReason || null,
@@ -634,6 +644,18 @@ router.get('/orders', async (req, res, next) => {
     if (req.query.mine === 'true') {
       query.createdBy = req.user.id;
     }
+    // Session-aware filtering: only include orders that belong to an OPEN DaySession.
+    if (req.query.openSession === 'true') {
+      const openSessions = await DaySession.find({
+        restaurant: restaurantId,
+        branch: branchId || null,
+        status: 'OPEN',
+      })
+        .select('_id')
+        .lean();
+      const openSessionIds = openSessions.map((s) => s._id);
+      query.daySession = { $in: openSessionIds };
+    }
     if (req.query.from || req.query.to) {
       query.createdAt = {};
       if (req.query.from) query.createdAt.$gte = new Date(req.query.from);
@@ -647,6 +669,7 @@ router.get('/orders', async (req, res, next) => {
     const [orders, total] = await Promise.all([
       Order.find(query)
         .populate('createdBy', 'name role')
+        .populate('assignedRiderId', 'name phone')
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit),
@@ -964,9 +987,8 @@ router.put('/orders/:id/assign-rider', async (req, res, next) => {
     order.assignedRiderPhone = rider.phone || '';
     order.deliveryCharges = Math.max(0, Number(deliveryCharges) || 0);
     order.grandTotal = order.total + order.deliveryCharges;
-    order.status = 'OUT_FOR_DELIVERY';
-    if (!order.statusHistory) order.statusHistory = [];
-    order.statusHistory.push({ status: 'OUT_FOR_DELIVERY', at: new Date() });
+    // Keep status unchanged (usually READY) so the assigned rider still has to collect from kitchen.
+    // The rider "collect" action is what transitions to OUT_FOR_DELIVERY.
     await order.save();
 
     const io = req.app.get('io');

@@ -2,6 +2,7 @@ const express = require('express');
 const Order = require('../models/Order');
 const User = require('../models/User');
 const Restaurant = require('../models/Restaurant');
+const DaySession = require('../models/DaySession');
 const Branch = require('../models/Branch');
 const Customer = require('../models/Customer');
 const Category = require('../models/Category');
@@ -225,9 +226,14 @@ router.get('/orders', async (req, res, next) => {
       return res.status(400).json({ message: 'Restaurant context missing' });
     }
 
+    // Riders should only see orders from the currently OPEN business-day session(s).
+    // A restaurant can have multiple branches => multiple OPEN sessions at once.
+    const openSessions = await DaySession.find({ restaurant: restaurantId, status: 'OPEN' }).select('_id').lean();
+    const openSessionIds = openSessions.map((s) => s._id);
+
     const statusFilter = req.query.status
       ? req.query.status
-      : { $in: ['NEW_ORDER', 'PREPARING', 'READY', 'OUT_FOR_DELIVERY', 'DELIVERED'] };
+      : { $in: ['NEW_ORDER', 'PROCESSING', 'READY', 'OUT_FOR_DELIVERY', 'DELIVERED'] };
 
     const filter = {
       restaurant: restaurantId,
@@ -236,8 +242,8 @@ router.get('/orders', async (req, res, next) => {
         { createdBy: req.user.id },
       ],
       status: statusFilter,
+      ...(openSessionIds.length > 0 ? { daySession: { $in: openSessionIds } } : { daySession: null }),
     };
-
     const orders = await Order.find(filter).sort({ createdAt: -1 }).limit(100);
     res.json(orders.map(mapRiderOrder));
   } catch (error) {
@@ -268,6 +274,12 @@ router.put('/orders/:id/collect', async (req, res, next) => {
 
     if (order.status !== 'READY') {
       return res.status(400).json({ message: `Order must be READY to collect (current: ${order.status})` });
+    }
+
+    // Only the assigned rider may collect when a rider is already assigned.
+    // If assignedRiderId is null, allow the first rider who presses collect.
+    if (order.assignedRiderId && order.assignedRiderId.toString() !== req.user.id) {
+      return res.status(403).json({ message: 'You are not assigned to collect this order' });
     }
 
     order.status = 'OUT_FOR_DELIVERY';
