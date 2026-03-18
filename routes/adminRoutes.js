@@ -2037,6 +2037,20 @@ router.get('/website', async (req, res, next) => {
 
 // RESTAURANT SETTINGS ROUTES (POS / shared settings)
 
+// @route   GET /api/admin/restaurant-info
+// @desc    Get basic restaurant identity (name, logo) – available to all staff roles
+// @access  Authenticated restaurant staff
+router.get('/restaurant-info', async (req, res, next) => {
+  try {
+    const restaurantId = getRestaurantIdForRequest(req);
+    const restaurant = await Restaurant.findById(restaurantId).select('name logoUrl').lean();
+    if (!restaurant) return res.status(404).json({ message: 'Restaurant not found' });
+    return res.json({ name: restaurant.name || '', logoUrl: restaurant.logoUrl || null });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // @route   GET /api/admin/settings
 // @desc    Get restaurant-level settings (shared across branches)
 // @access  Restaurant Admin / Super Admin
