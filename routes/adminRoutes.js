@@ -2043,10 +2043,10 @@ router.get('/website', async (req, res, next) => {
 router.get('/restaurant-info', async (req, res, next) => {
   try {
     const restaurantId = getRestaurantIdForRequest(req);
-    const restaurant = await Restaurant.findById(restaurantId).select('website settings').lean();
+    const restaurant = await Restaurant.findById(restaurantId).select('name website settings').lean();
     if (!restaurant) return res.status(404).json({ message: 'Restaurant not found' });
     return res.json({
-      name: restaurant.website?.name || '',
+      name: restaurant.website?.name || restaurant.name || '',
       logoUrl: restaurant.settings?.restaurantLogoUrl || restaurant.website?.logoUrl || null,
     });
   } catch (error) {
