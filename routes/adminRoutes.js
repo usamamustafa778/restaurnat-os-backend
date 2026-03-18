@@ -1013,7 +1013,16 @@ router.put('/orders/:id/collect-payment', async (req, res, next) => {
       return res.status(403).json({ message: 'Insufficient permissions to record payment collection' });
     }
     const restaurantId = getRestaurantIdForRequest(req);
-    const { paymentMethod = 'CASH' } = req.body;
+    const { paymentMethod = 'CASH', paymentProvider } = req.body;
+
+    if (!['CASH', 'CARD', 'ONLINE'].includes(paymentMethod)) {
+      return res.status(400).json({ message: 'Invalid paymentMethod; use CASH, CARD, or ONLINE' });
+    }
+    if (paymentMethod === 'ONLINE') {
+      if (!paymentProvider || !String(paymentProvider).trim()) {
+        return res.status(400).json({ message: 'For ONLINE payment, paymentProvider is required' });
+      }
+    }
 
     let order;
     if (/^[0-9a-fA-F]{24}$/.test(req.params.id)) {
@@ -1034,6 +1043,7 @@ router.put('/orders/:id/collect-payment', async (req, res, next) => {
 
     order.deliveryPaymentCollected = true;
     order.paymentMethod = paymentMethod;
+    order.paymentProvider = paymentMethod === 'ONLINE' ? paymentProvider : null;
     order.paymentAmountReceived = order.total;
     order.paymentAmountReturned = 0;
     await order.save();
