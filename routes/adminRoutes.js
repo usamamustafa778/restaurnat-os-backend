@@ -764,11 +764,15 @@ router.put('/orders/:id', async (req, res, next) => {
       order.subtotal = subtotal;
       order.discountAmount = discount;
       order.total = total;
+      // Keep grandTotal consistent with UI/order-card totals.
+      // grandTotal includes delivery charges (if any).
+      order.grandTotal = total + (Number(order.deliveryCharges) || 0);
     }
 
     if (discountAmount !== undefined && !(Array.isArray(items) && items.length > 0)) {
       order.discountAmount = Math.max(0, Number(discountAmount) || 0);
       order.total = Math.max(0, (order.subtotal || 0) - order.discountAmount);
+      order.grandTotal = order.total + (Number(order.deliveryCharges) || 0);
     }
     if (customerName !== undefined) order.customerName = String(customerName || '').trim();
     if (customerPhone !== undefined) order.customerPhone = String(customerPhone || '').trim();
