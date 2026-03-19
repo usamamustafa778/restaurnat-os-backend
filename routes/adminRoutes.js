@@ -421,6 +421,9 @@ const mapOrder = (order) => {
   const createdByObj = order.createdBy && typeof order.createdBy === 'object' ? order.createdBy : null;
   const orderTakerName = createdByObj && createdByObj.name ? createdByObj.name : '';
   const createdByRole = createdByObj && createdByObj.role ? createdByObj.role : null;
+  const normalizedTotal = Number(order.total) || 0;
+  const normalizedDeliveryCharges = Number(order.deliveryCharges) || 0;
+  const normalizedGrandTotal = normalizedTotal + normalizedDeliveryCharges;
 
   return {
     id: order.orderNumber || order._id.toString(),
@@ -433,8 +436,9 @@ const mapOrder = (order) => {
     tableNumber: order.tableNumber || '',
     tableName: order.tableName || '',
     tableId: order.table ? order.table.toString() : null,
-    total: order.total,
-    grandTotal: order.grandTotal ?? order.total,
+    total: normalizedTotal,
+    // Derive from total + deliveryCharges to avoid stale persisted grandTotal values.
+    grandTotal: normalizedGrandTotal,
     subtotal: order.subtotal,
     discountAmount: order.discountAmount || 0,
     status: order.status,
