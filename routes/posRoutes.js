@@ -12,6 +12,7 @@ const Deal = require('../models/Deal');
 const { protect, requireRole, requireRestaurant, checkSubscriptionStatus } = require('../middleware/authMiddleware');
 const { generateOrderNumber } = require('../utils/orderNumber');
 const { getOrderRooms } = require('../utils/socketRooms');
+const CLOSED_ORDER_STATUSES = ['DELIVERED', 'COMPLETED'];
 
 function getExpectedSessionEndAt(startAt, cutoffHour = 4) {
   const start = new Date(startAt);
@@ -33,6 +34,22 @@ function buildSessionKey(startAt, endAt) {
       hour12: false,
     });
   return `${fmt(startAt)} - ${fmt(endAt)}`;
+}
+
+function isOrderPaid(order) {
+  if (!order) return false;
+  if (order.source === 'FOODPANDA') return true;
+  if (order.paymentAmountReceived != null && Number(order.paymentAmountReceived) > 0) return true;
+  const pm = String(order.paymentMethod || '').toUpperCase();
+  if (pm === 'CASH' || pm === 'CARD' || pm === 'ONLINE' || pm === 'FOODPANDA') return true;
+  if (String(order.orderType || '').toUpperCase() === 'DELIVERY' && order.deliveryPaymentCollected === true) return true;
+  return false;
+}
+
+function getSessionOrderTimeFilter(session) {
+  const filter = { $gte: session.startAt };
+  filter.$lte = session.endAt || new Date();
+  return filter;
 }
 
 async function closeSessionIfPastCutoff(session, cutoffHour, closedBy = null, now = new Date()) {
@@ -1191,7 +1208,13 @@ router.get('/day-session/current', async (req, res, next) => {
 
     // Aggregate sales and order count for the active session (exclude cancelled)
     const agg = await Order.aggregate([
-      { $match: { daySession: session._id, status: { $nin: ['CANCELLED'] } } },
+      {
+        $match: {
+          daySession: session._id,
+          createdAt: getSessionOrderTimeFilter(session),
+          status: { $in: CLOSED_ORDER_STATUSES },
+        },
+      },
       { $group: { _id: null, totalSales: { $sum: { $ifNull: ['$grandTotal', '$total'] } }, totalOrders: { $sum: 1 } } },
     ]);
     const { totalSales = 0, totalOrders = 0 } = agg[0] || {};
@@ -1454,6 +1477,65 @@ router.post('/day-session/reassign-to-current', async (req, res, next) => {
   }
 });
 
+// @route   POST /api/pos/day-session/reassign-orders
+// @desc    Move selected orders into a target day session (bulk fix tool)
+// @access  Staff / Cashier / Admin
+router.post('/day-session/reassign-orders', async (req, res, next) => {
+  try {
+    const restaurantId = req.restaurant._id;
+    const branchId = req.body.branchId || req.headers['x-branch-id'] || null;
+    const { invalid } = await resolveBranchAndCutoff(restaurantId, branchId);
+    if (invalid) {
+      return res.status(400).json({ message: 'Invalid branchId for this restaurant' });
+    }
+
+    const { orderIds, targetSessionId } = req.body || {};
+    if (!Array.isArray(orderIds) || orderIds.length === 0) {
+      return res.status(400).json({ message: 'orderIds array is required' });
+    }
+    if (!targetSessionId) {
+      return res.status(400).json({ message: 'targetSessionId is required' });
+    }
+
+    const targetSession = await DaySession.findOne({
+      _id: targetSessionId,
+      restaurant: restaurantId,
+      branch: branchId || null,
+    });
+    if (!targetSession) {
+      return res.status(404).json({ message: 'Target day session not found' });
+    }
+
+    const filter = {
+      _id: { $in: orderIds },
+      restaurant: restaurantId,
+    };
+    if (branchId) filter.branch = branchId;
+
+    const before = await Order.find(filter).select({ _id: 1, orderNumber: 1, daySession: 1 }).lean();
+    if (before.length === 0) {
+      return res.status(404).json({ message: 'No matching orders found' });
+    }
+
+    const result = await Order.updateMany(filter, { $set: { daySession: targetSession._id } });
+
+    return res.json({
+      success: true,
+      movedOrders: result.modifiedCount || 0,
+      movedOrderIds: before.map((o) => o._id.toString()),
+      movedOrderNumbers: before.map((o) => o.orderNumber),
+      targetSession: {
+        id: targetSession._id.toString(),
+        startAt: targetSession.startAt,
+        endAt: targetSession.endAt || null,
+        status: targetSession.status,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // @route   GET /api/pos/day-session/list
 // @desc    List all day sessions (history) for this restaurant/branch
 // @access  Staff / Cashier / Admin
@@ -1483,9 +1565,18 @@ router.get('/day-session/list', async (req, res, next) => {
 
     const formatted = await Promise.all(
       sessions.map(async (s) => {
-        const orderCount = await Order.countDocuments({ daySession: s._id });
+        const orderCount = await Order.countDocuments({
+          daySession: s._id,
+          createdAt: getSessionOrderTimeFilter(s),
+        });
         const totalsAgg = await Order.aggregate([
-          { $match: { daySession: s._id, status: { $nin: ['CANCELLED'] } } },
+          {
+            $match: {
+              daySession: s._id,
+              createdAt: getSessionOrderTimeFilter(s),
+              status: { $in: CLOSED_ORDER_STATUSES },
+            },
+          },
           { $group: { _id: null, totalSales: { $sum: { $ifNull: ['$grandTotal', '$total'] } }, totalOrders: { $sum: 1 } } },
         ]);
         const agg = totalsAgg[0] || { totalSales: 0, totalOrders: 0 };
@@ -1543,9 +1634,16 @@ router.post('/day-session/bulk-orders', async (req, res, next) => {
     }
 
     const validIds = sessions.map((s) => s._id);
+    const sessionTimeOr = sessions.map((s) => ({
+      daySession: s._id,
+      createdAt: getSessionOrderTimeFilter(s),
+    }));
 
     const [orders, totalsAgg] = await Promise.all([
-      Order.find({ daySession: { $in: validIds }, restaurant: restaurantId })
+      Order.find({
+        restaurant: restaurantId,
+        $or: sessionTimeOr,
+      })
         .sort({ createdAt: -1 })
         .populate('createdBy', 'name')
         .lean(),
@@ -1553,8 +1651,9 @@ router.post('/day-session/bulk-orders', async (req, res, next) => {
       Order.aggregate([
         {
           $match: {
-            daySession: { $in: validIds },
-            status: { $nin: ['CANCELLED'] },
+            restaurant: restaurantId,
+            $or: sessionTimeOr,
+            status: { $in: CLOSED_ORDER_STATUSES },
           },
         },
         {
@@ -1590,6 +1689,7 @@ router.post('/day-session/bulk-orders', async (req, res, next) => {
         orderNumber: o.orderNumber,
         orderType: o.orderType,
         paymentMethod: o.paymentMethod,
+        isPaid: isOrderPaid(o),
         status: o.status,
         customerName: o.customerName,
         subtotal: o.subtotal,
@@ -1622,13 +1722,23 @@ router.get('/day-session/:sessionId/orders', async (req, res, next) => {
       return res.status(404).json({ message: 'Day session not found' });
     }
 
-    const orders = await Order.find({ daySession: sessionId, restaurant: restaurantId })
+    const orders = await Order.find({
+      daySession: sessionId,
+      restaurant: restaurantId,
+      createdAt: getSessionOrderTimeFilter(session),
+    })
       .sort({ createdAt: -1 })
       .populate('createdBy', 'name')
       .lean();
 
     const totalsAgg = await Order.aggregate([
-      { $match: { daySession: session._id, status: { $nin: ['CANCELLED'] } } },
+      {
+        $match: {
+          daySession: session._id,
+          createdAt: getSessionOrderTimeFilter(session),
+          status: { $in: CLOSED_ORDER_STATUSES },
+        },
+      },
       {
         $group: {
           _id: null,
@@ -1658,6 +1768,7 @@ router.get('/day-session/:sessionId/orders', async (req, res, next) => {
         orderNumber: o.orderNumber,
         orderType: o.orderType,
         paymentMethod: o.paymentMethod,
+        isPaid: isOrderPaid(o),
         status: o.status,
         customerName: o.customerName,
         subtotal: o.subtotal,
