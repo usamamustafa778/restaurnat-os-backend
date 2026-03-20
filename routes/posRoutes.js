@@ -1261,11 +1261,28 @@ router.post('/day-session/end', async (req, res, next) => {
       const selectedOrder = await Order.findOne({
         _id: selectedOrderId,
         restaurant: restaurantId,
-        daySession: targetSession._id,
-      }).select({ createdAt: 1 }).lean();
+      })
+        .select({ createdAt: 1, daySession: 1 })
+        .lean();
 
       if (!selectedOrder?.createdAt) {
-        return res.status(400).json({ message: 'Invalid selected order for this session' });
+        return res.status(400).json({ message: 'Invalid selected order' });
+      }
+      if (!selectedOrder.daySession) {
+        return res.status(400).json({ message: 'Selected order is not linked to a day session' });
+      }
+
+      // If the selected order belongs to a different session than the guessed target,
+      // use the order's own session as source of truth.
+      if (String(selectedOrder.daySession) !== String(targetSession._id)) {
+        const selectedOrderSession = await DaySession.findOne({
+          _id: selectedOrder.daySession,
+          restaurant: restaurantId,
+        });
+        if (!selectedOrderSession) {
+          return res.status(400).json({ message: 'Selected order session not found' });
+        }
+        targetSession = selectedOrderSession;
       }
 
       endAt = new Date(selectedOrder.createdAt);
@@ -1331,6 +1348,105 @@ router.post('/day-session/end', async (req, res, next) => {
         id: targetSession._id.toString(),
         startAt: targetSession.startAt,
         endAt: targetSession.endAt,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// @route   POST /api/pos/day-session/reassign-to-current
+// @desc    Repair tool: move misplaced orders from a past session into current OPEN session
+// @access  Staff / Cashier / Admin
+router.post('/day-session/reassign-to-current', async (req, res, next) => {
+  try {
+    const restaurantId = req.restaurant._id;
+    const branchId = req.body.branchId || req.headers['x-branch-id'] || null;
+    const { invalid } = await resolveBranchAndCutoff(restaurantId, branchId);
+    if (invalid) {
+      return res.status(400).json({ message: 'Invalid branchId for this restaurant' });
+    }
+
+    const {
+      sourceSessionId,
+      // Default repair behavior: only move records that happened after the source end.
+      onlyAfterSourceEnd = true,
+      includeCancelled = false,
+      orderNumbers = [],
+    } = req.body || {};
+
+    const hasOrderNumbers = Array.isArray(orderNumbers) && orderNumbers.length > 0;
+    if (!sourceSessionId && !hasOrderNumbers) {
+      return res.status(400).json({ message: 'sourceSessionId or orderNumbers is required' });
+    }
+
+    let sourceSession = null;
+    if (sourceSessionId) {
+      sourceSession = await DaySession.findOne({
+        _id: sourceSessionId,
+        restaurant: restaurantId,
+        branch: branchId || null,
+      });
+      if (!sourceSession) {
+        return res.status(404).json({ message: 'Source day session not found' });
+      }
+    }
+
+    let currentOpen = await DaySession.findOne({
+      restaurant: restaurantId,
+      branch: branchId || null,
+      status: 'OPEN',
+    });
+
+    if (!currentOpen) {
+      currentOpen = await DaySession.create({
+        restaurant: restaurantId,
+        branch: branchId || null,
+        status: 'OPEN',
+        startAt: new Date(),
+        openedBy: req.user?._id || null,
+      });
+    }
+
+    if (sourceSession && String(currentOpen._id) === String(sourceSession._id)) {
+      return res.status(400).json({ message: 'Source session is already the current OPEN session' });
+    }
+
+    const filter = {
+      restaurant: restaurantId,
+    };
+    if (branchId) filter.branch = branchId;
+    if (sourceSession) {
+      filter.daySession = sourceSession._id;
+    }
+    if (hasOrderNumbers) {
+      filter.orderNumber = { $in: orderNumbers.map((n) => String(n || '').trim()).filter(Boolean) };
+    }
+    if (!includeCancelled) {
+      filter.status = { $nin: ['CANCELLED'] };
+    }
+    if (sourceSession && onlyAfterSourceEnd && sourceSession.endAt) {
+      filter.createdAt = { $gt: sourceSession.endAt };
+    }
+
+    const before = await Order.find(filter).select({ _id: 1, orderNumber: 1 }).lean();
+    const result = await Order.updateMany(filter, { $set: { daySession: currentOpen._id } });
+
+    return res.json({
+      success: true,
+      movedOrders: result.modifiedCount || 0,
+      movedOrderNumbers: before.map((o) => o.orderNumber),
+      sourceSession: sourceSession
+        ? {
+            id: sourceSession._id.toString(),
+            startAt: sourceSession.startAt,
+            endAt: sourceSession.endAt || null,
+          }
+        : null,
+      targetSession: {
+        id: currentOpen._id.toString(),
+        startAt: currentOpen.startAt,
+        endAt: currentOpen.endAt || null,
       },
     });
   } catch (err) {
