@@ -8,8 +8,10 @@ const InventoryItem = require('../models/InventoryItem');
 const Customer = require('../models/Customer');
 const Order = require('../models/Order');
 const Deal = require('../models/Deal');
+const AgentConversation = require('../models/AgentConversation');
 const { generateOrderNumber } = require('../utils/orderNumber');
 const { getOrderRooms } = require('../utils/socketRooms');
+const crypto = require('crypto');
 
 const router = express.Router();
 
@@ -45,6 +47,37 @@ setInterval(() => {
     if (now - entry.start > 120000) rateLimitStore.delete(key);
   }
 }, 60000);
+
+/**
+ * Optional OpenAI reply (uses OPENAI_API_KEY on the server).
+ */
+async function generateOpenAiReply({ restaurantName, contactPhone, userMessages }) {
+  const key = process.env.OPENAI_API_KEY;
+  if (!key) return null;
+  const model = process.env.OPENAI_CHAT_MODEL || 'gpt-4o-mini';
+  const phone = contactPhone || 'the restaurant';
+  const system = `You are ${restaurantName}'s friendly customer chat assistant. Be brief and helpful.
+If asked about ordering, mention they can use the website ordering when it is available.
+If unsure about menu prices or items, suggest checking the menu on the site or calling ${phone}.
+Do not invent specific prices or dishes; keep answers general unless the user pasted them.`;
+
+  const msgs = [
+    { role: 'system', content: system },
+    ...userMessages.slice(-16).map((m) => ({ role: m.role, content: m.content })),
+  ];
+
+  const res = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${key}`,
+    },
+    body: JSON.stringify({ model, messages: msgs, max_tokens: 500, temperature: 0.7 }),
+  });
+  if (!res.ok) return null;
+  const data = await res.json();
+  return data.choices?.[0]?.message?.content?.trim() || null;
+}
 
 // ---------------------------------------------------------------------------
 // Shared helper – resolve restaurant by slug, return 404 / 403 as needed
@@ -82,6 +115,7 @@ router.get(
       const w = restaurant.website;
       setCacheHeaders(res, 60, 300);
 
+      const ai = w.aiAgents || {};
       res.json({
         slug: w.subdomain,
         name: w.name,
@@ -107,6 +141,14 @@ router.get(
             isActive: s.isActive,
             items: (s.items || []).map((id) => id.toString()),
           })),
+        aiAgents: {
+          chatEnabled: ai.chatEnabled === true,
+          chatWelcomeMessage: ai.chatWelcomeMessage || 'Hi! How can we help you today?',
+          chatAssistantName: ai.chatAssistantName || 'Assistant',
+          callAgentEnabled: ai.callAgentEnabled === true,
+          callAgentPhone: ai.callAgentPhone || '',
+          callAgentNote: ai.callAgentNote || '',
+        },
       });
     } catch (error) {
       next(error);
@@ -373,6 +415,90 @@ router.get(
 
       setCacheHeaders(res, 60, 300);
       res.json(publicDeals);
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// POST /api/storefront/:slug/agent/chat  — public AI chat (when enabled)
+// ---------------------------------------------------------------------------
+router.post(
+  '/:slug/agent/chat',
+  rateLimit({ windowMs: 60000, max: 40 }),
+  async (req, res, next) => {
+    try {
+      const restaurant = await resolveBySlug(req.params.slug);
+      if (!restaurant) return res.status(404).json({ message: 'Restaurant not found' });
+      if (restaurant.subscription?.status === 'SUSPENDED') {
+        return res.status(403).json({ message: 'Subscription inactive or expired', suspended: true });
+      }
+      if (!restaurant.website?.isPublic) {
+        return res.status(403).json({ message: 'Restaurant website is not public' });
+      }
+
+      const ai = restaurant.website?.aiAgents || {};
+      if (!ai.chatEnabled) {
+        return res.status(403).json({ message: 'Chat is not enabled for this restaurant' });
+      }
+
+      const { message, sessionId: incomingSession } = req.body || {};
+      const text = typeof message === 'string' ? message.trim() : '';
+      if (!text || text.length > 4000) {
+        return res.status(400).json({ message: 'message is required (max 4000 characters)' });
+      }
+
+      const sessionId =
+        incomingSession && String(incomingSession).length >= 8
+          ? String(incomingSession)
+          : crypto.randomBytes(16).toString('hex');
+
+      const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.ip || '';
+      const userAgent = req.headers['user-agent'] || '';
+
+      let convo = await AgentConversation.findOne({
+        restaurant: restaurant._id,
+        sessionId,
+        channel: 'chat',
+      });
+
+      if (!convo) {
+        convo = await AgentConversation.create({
+          restaurant: restaurant._id,
+          channel: 'chat',
+          sessionId,
+          slug: req.params.slug,
+          messages: [],
+          meta: { ip, userAgent },
+        });
+      }
+
+      convo.messages.push({ role: 'user', content: text, at: new Date() });
+
+      const historyForModel = convo.messages
+        .filter((m) => m.role === 'user' || m.role === 'assistant')
+        .map((m) => ({ role: m.role, content: m.content }));
+
+      const fallback = `Thanks for your message! For immediate help, call us at ${
+        restaurant.website?.contactPhone || 'the number on our website'
+      }.`;
+
+      const reply =
+        (await generateOpenAiReply({
+          restaurantName: restaurant.website?.name || restaurant.name,
+          contactPhone: restaurant.website?.contactPhone || '',
+          userMessages: historyForModel,
+        })) || fallback;
+
+      convo.messages.push({ role: 'assistant', content: reply, at: new Date() });
+      await convo.save();
+
+      res.json({
+        sessionId,
+        reply,
+        assistantName: ai.chatAssistantName || 'Assistant',
+      });
     } catch (error) {
       next(error);
     }

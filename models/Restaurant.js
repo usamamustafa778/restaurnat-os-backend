@@ -123,6 +123,19 @@ const websiteSettingsSchema = new mongoose.Schema(
       type: String,
       default: null,
     },
+    // AI chat / voice agent (customer-facing; secrets stay server-side)
+    aiAgents: {
+      chatEnabled: { type: Boolean, default: false },
+      chatWelcomeMessage: {
+        type: String,
+        default: 'Hi! How can we help you today?',
+      },
+      chatAssistantName: { type: String, default: 'Assistant' },
+      callAgentEnabled: { type: Boolean, default: false },
+      // Shown on website when call agent is enabled (e.g. Twilio number)
+      callAgentPhone: { type: String, default: '' },
+      callAgentNote: { type: String, default: '' },
+    },
   },
   { _id: false }
 );

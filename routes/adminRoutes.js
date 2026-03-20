@@ -15,6 +15,7 @@ const Reservation = require('../models/Reservation');
 const DailyCurrency = require('../models/DailyCurrency');
 const PaymentAccount = require('../models/PaymentAccount');
 const DaySession = require('../models/DaySession');
+const AgentConversation = require('../models/AgentConversation');
 const { protect, requireRole, requireRestaurant, checkSubscriptionStatus, resolveBranch } = require('../middleware/authMiddleware');
 const { getOrderRooms } = require('../utils/socketRooms');
 
@@ -2070,6 +2071,168 @@ router.get('/website', async (req, res, next) => {
     }
 
     res.json(merged);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ─── AI agents (chat / call) settings & conversation logs ───────────────────
+
+function canManageAiAgents(req) {
+  return ['restaurant_admin', 'admin', 'super_admin', 'manager'].includes(req.user.role);
+}
+
+// @route   GET /api/admin/agents
+// @desc    AI agent toggles + copy for storefront
+router.get('/agents', async (req, res, next) => {
+  try {
+    if (!canManageAiAgents(req)) {
+      return res.status(403).json({ message: 'You do not have permission to manage AI agents' });
+    }
+    const restaurantId = getRestaurantIdForRequest(req);
+    const restaurant = await Restaurant.findById(restaurantId);
+    if (!restaurant) return res.status(404).json({ message: 'Restaurant not found' });
+    if (!restaurant.website) restaurant.website = {};
+    const ai = restaurant.website.aiAgents || {};
+    res.json({
+      chatEnabled: ai.chatEnabled === true,
+      chatWelcomeMessage: ai.chatWelcomeMessage || 'Hi! How can we help you today?',
+      chatAssistantName: ai.chatAssistantName || 'Assistant',
+      callAgentEnabled: ai.callAgentEnabled === true,
+      callAgentPhone: ai.callAgentPhone || '',
+      callAgentNote: ai.callAgentNote || '',
+      openaiConfigured: !!process.env.OPENAI_API_KEY,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @route   PUT /api/admin/agents
+// @desc    Update AI agent settings (stored on restaurant.website.aiAgents)
+router.put('/agents', async (req, res, next) => {
+  try {
+    if (!canManageAiAgents(req)) {
+      return res.status(403).json({ message: 'You do not have permission to manage AI agents' });
+    }
+    const restaurantId = getRestaurantIdForRequest(req);
+    const restaurant = await Restaurant.findById(restaurantId);
+    if (!restaurant) return res.status(404).json({ message: 'Restaurant not found' });
+    if (!restaurant.website) restaurant.website = {};
+    if (!restaurant.website.aiAgents) restaurant.website.aiAgents = {};
+
+    const {
+      chatEnabled,
+      chatWelcomeMessage,
+      chatAssistantName,
+      callAgentEnabled,
+      callAgentPhone,
+      callAgentNote,
+    } = req.body;
+
+    if (typeof chatEnabled === 'boolean') restaurant.website.aiAgents.chatEnabled = chatEnabled;
+    if (typeof chatWelcomeMessage === 'string') {
+      restaurant.website.aiAgents.chatWelcomeMessage = chatWelcomeMessage.slice(0, 500);
+    }
+    if (typeof chatAssistantName === 'string') {
+      restaurant.website.aiAgents.chatAssistantName = chatAssistantName.slice(0, 80);
+    }
+    if (typeof callAgentEnabled === 'boolean') {
+      restaurant.website.aiAgents.callAgentEnabled = callAgentEnabled;
+    }
+    if (typeof callAgentPhone === 'string') {
+      restaurant.website.aiAgents.callAgentPhone = callAgentPhone.slice(0, 40);
+    }
+    if (typeof callAgentNote === 'string') {
+      restaurant.website.aiAgents.callAgentNote = callAgentNote.slice(0, 500);
+    }
+
+    restaurant.markModified('website');
+    await restaurant.save();
+
+    const ai = restaurant.website.aiAgents || {};
+    res.json({
+      chatEnabled: ai.chatEnabled === true,
+      chatWelcomeMessage: ai.chatWelcomeMessage || 'Hi! How can we help you today?',
+      chatAssistantName: ai.chatAssistantName || 'Assistant',
+      callAgentEnabled: ai.callAgentEnabled === true,
+      callAgentPhone: ai.callAgentPhone || '',
+      callAgentNote: ai.callAgentNote || '',
+      openaiConfigured: !!process.env.OPENAI_API_KEY,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @route   GET /api/admin/agents/conversations
+// @desc    Paginated chat conversation logs
+router.get('/agents/conversations', async (req, res, next) => {
+  try {
+    if (!canManageAiAgents(req)) {
+      return res.status(403).json({ message: 'You do not have permission to view AI conversations' });
+    }
+    const restaurantId = getRestaurantIdForRequest(req);
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(50, Math.max(1, parseInt(req.query.limit, 10) || 20));
+    const skip = (page - 1) * limit;
+
+    const [docs, total] = await Promise.all([
+      AgentConversation.find({ restaurant: restaurantId })
+        .sort({ updatedAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      AgentConversation.countDocuments({ restaurant: restaurantId }),
+    ]);
+
+    const conversations = docs.map((d) => {
+      const msgs = d.messages || [];
+      const last = msgs.length ? msgs[msgs.length - 1] : null;
+      const firstUser = msgs.find((m) => m.role === 'user');
+      return {
+        id: d._id.toString(),
+        sessionId: d.sessionId,
+        channel: d.channel,
+        slug: d.slug,
+        messageCount: msgs.length,
+        preview: firstUser?.content ? String(firstUser.content).slice(0, 120) : '',
+        lastRole: last?.role,
+        lastSnippet: last?.content ? String(last.content).slice(0, 160) : '',
+        updatedAt: d.updatedAt,
+        createdAt: d.createdAt,
+      };
+    });
+
+    res.json({ page, limit, total, conversations });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @route   GET /api/admin/agents/conversations/:id
+// @desc    Full message thread for one conversation
+router.get('/agents/conversations/:id', async (req, res, next) => {
+  try {
+    if (!canManageAiAgents(req)) {
+      return res.status(403).json({ message: 'You do not have permission to view AI conversations' });
+    }
+    const restaurantId = getRestaurantIdForRequest(req);
+    const doc = await AgentConversation.findOne({
+      _id: req.params.id,
+      restaurant: restaurantId,
+    }).lean();
+    if (!doc) return res.status(404).json({ message: 'Conversation not found' });
+    res.json({
+      id: doc._id.toString(),
+      sessionId: doc.sessionId,
+      channel: doc.channel,
+      slug: doc.slug,
+      messages: doc.messages || [],
+      meta: doc.meta || {},
+      updatedAt: doc.updatedAt,
+      createdAt: doc.createdAt,
+    });
   } catch (error) {
     next(error);
   }
