@@ -54,6 +54,18 @@ async function resolveBranchAndCutoff(restaurantId, branchId) {
   return { branch, cutoffHour: branch.businessDayCutoffHour ?? 4 };
 }
 
+async function getLastCompletedOrderAt({ restaurantId, sessionId }) {
+  const last = await Order.findOne({
+    restaurant: restaurantId,
+    daySession: sessionId,
+    status: { $in: ['DELIVERED', 'COMPLETED'] },
+  })
+    .sort({ createdAt: -1 })
+    .select({ createdAt: 1 })
+    .lean();
+  return last?.createdAt ? new Date(last.createdAt) : null;
+}
+
 // Returns existing OPEN session or auto-creates a new one (no manual start needed)
 async function getOrCreateCurrentSession(restaurantId, branch, userId) {
   const branchId = branch ? branch._id : null;
@@ -1207,44 +1219,118 @@ router.post('/day-session/end', async (req, res, next) => {
     if (invalid) {
       return res.status(400).json({ message: 'Invalid branchId for this restaurant' });
     }
+    const endMode = String(req.body.endMode || 'cutoff');
+    const selectedOrderId = req.body.selectedOrderId || null;
+    const normalizedEndMode =
+      endMode === 'lastOrder' ||
+      endMode === 'cutoff' ||
+      endMode === 'now' ||
+      endMode === 'selectedOrder'
+        ? endMode
+        : 'cutoff';
 
-    const session = await DaySession.findOne({
+    let targetSession = await DaySession.findOne({
       restaurant: restaurantId,
       branch: branchId || null,
       status: 'OPEN',
     });
 
-    if (!session) {
-      return res.status(400).json({ message: 'No open day session found' });
+    if (!targetSession) {
+      // If the session was auto-closed already, allow adjusting the most recent closed session.
+      targetSession = await DaySession.findOne({
+        restaurant: restaurantId,
+        branch: branchId || null,
+        status: 'CLOSED',
+      }).sort({ startAt: -1 });
+    }
+
+    if (!targetSession) {
+      return res.status(400).json({ message: 'No day session found' });
     }
 
     const now = new Date();
-    await closeSessionIfPastCutoff(session, cutoffHour, null, now);
-    if (session.status === 'CLOSED') {
+    const expectedEndAt = getExpectedSessionEndAt(targetSession.startAt, cutoffHour);
+
+    let endAt = expectedEndAt;
+    if (normalizedEndMode === 'now') {
+      endAt = now;
+    } else if (normalizedEndMode === 'selectedOrder') {
+      if (!selectedOrderId) {
+        return res.status(400).json({ message: 'selectedOrderId is required for selectedOrder endMode' });
+      }
+      const selectedOrder = await Order.findOne({
+        _id: selectedOrderId,
+        restaurant: restaurantId,
+        daySession: targetSession._id,
+      }).select({ createdAt: 1 }).lean();
+
+      if (!selectedOrder?.createdAt) {
+        return res.status(400).json({ message: 'Invalid selected order for this session' });
+      }
+
+      endAt = new Date(selectedOrder.createdAt);
+    } else if (normalizedEndMode === 'lastOrder') {
+      const lastOrderAt = await getLastCompletedOrderAt({ restaurantId, sessionId: targetSession._id });
+      // If the last delivered/completed order happened after the cutoff, extend endAt
+      // so the report range includes those orders.
+      endAt = lastOrderAt && lastOrderAt > expectedEndAt ? lastOrderAt : expectedEndAt;
+    } // else 'cutoff' => keep expectedEndAt
+
+    targetSession.status = 'CLOSED';
+    targetSession.endAt = endAt;
+    targetSession.closedBy = req.user._id;
+    targetSession.sessionKey = buildSessionKey(targetSession.startAt, targetSession.endAt);
+
+    await targetSession.save();
+
+    if (normalizedEndMode === 'selectedOrder') {
+      // Create/reuse a new OPEN session and move orders created after endAt.
+      const nextOpenSession =
+        (await DaySession.findOne({
+          restaurant: restaurantId,
+          branch: branchId || null,
+          status: 'OPEN',
+        }).lean()) ||
+        (await DaySession.create({
+          restaurant: restaurantId,
+          branch: branchId || null,
+          status: 'OPEN',
+          startAt: endAt,
+          openedBy: req.user._id,
+        }));
+
+      // Move non-cancelled orders after selected cutoff into the new OPEN session.
+      await Order.updateMany(
+        {
+          restaurant: restaurantId,
+          daySession: targetSession._id,
+          createdAt: { $gt: endAt },
+          status: { $nin: ['CANCELLED'] },
+        },
+        { $set: { daySession: nextOpenSession._id } },
+      );
+
       return res.json({
         success: true,
-        message: 'Day session was auto-closed at reset time',
         session: {
-          id: session._id.toString(),
-          startAt: session.startAt,
-          endAt: session.endAt,
+          id: targetSession._id.toString(),
+          startAt: targetSession.startAt,
+          endAt: targetSession.endAt,
+        },
+        nextOpenSession: {
+          id: nextOpenSession._id.toString(),
+          startAt: nextOpenSession.startAt,
+          endAt: nextOpenSession.endAt || null,
         },
       });
     }
 
-    session.status = 'CLOSED';
-    session.endAt = now;
-    session.closedBy = req.user._id;
-    session.sessionKey = buildSessionKey(session.startAt, session.endAt);
-
-    await session.save();
-
     return res.json({
       success: true,
       session: {
-        id: session._id.toString(),
-        startAt: session.startAt,
-        endAt: session.endAt,
+        id: targetSession._id.toString(),
+        startAt: targetSession.startAt,
+        endAt: targetSession.endAt,
       },
     });
   } catch (err) {
