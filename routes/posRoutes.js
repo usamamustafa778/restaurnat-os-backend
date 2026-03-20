@@ -13,10 +13,56 @@ const { protect, requireRole, requireRestaurant, checkSubscriptionStatus } = req
 const { generateOrderNumber } = require('../utils/orderNumber');
 const { getOrderRooms } = require('../utils/socketRooms');
 
+function getExpectedSessionEndAt(startAt, cutoffHour = 4) {
+  const start = new Date(startAt);
+  const end = new Date(start);
+  end.setHours(cutoffHour, 0, 0, 0);
+  if (start >= end) end.setDate(end.getDate() + 1);
+  return end;
+}
+
+function buildSessionKey(startAt, endAt) {
+  const fmt = (d) =>
+    d.toLocaleString('en-PK', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    });
+  return `${fmt(startAt)} - ${fmt(endAt)}`;
+}
+
+async function closeSessionIfPastCutoff(session, cutoffHour, closedBy = null, now = new Date()) {
+  if (!session || session.status !== 'OPEN') return { closed: false, session };
+  const expectedEndAt = getExpectedSessionEndAt(session.startAt, cutoffHour);
+  if (now < expectedEndAt) return { closed: false, session };
+  session.status = 'CLOSED';
+  session.endAt = expectedEndAt;
+  session.closedBy = closedBy || null;
+  session.sessionKey = buildSessionKey(session.startAt, session.endAt);
+  await session.save();
+  return { closed: true, session };
+}
+
+async function resolveBranchAndCutoff(restaurantId, branchId) {
+  if (!branchId) return { branch: null, cutoffHour: 4 };
+  const branch = await Branch.findOne({ _id: branchId, restaurant: restaurantId });
+  if (!branch) return { branch: null, cutoffHour: 4, invalid: true };
+  return { branch, cutoffHour: branch.businessDayCutoffHour ?? 4 };
+}
+
 // Returns existing OPEN session or auto-creates a new one (no manual start needed)
 async function getOrCreateCurrentSession(restaurantId, branch, userId) {
   const branchId = branch ? branch._id : null;
+  const cutoffHour = branch?.businessDayCutoffHour ?? 4;
   let session = await DaySession.findOne({ restaurant: restaurantId, branch: branchId, status: 'OPEN' });
+  if (session) {
+    await closeSessionIfPastCutoff(session, cutoffHour, null);
+    if (session.status === 'CLOSED') session = null;
+  }
   if (!session) {
     session = await DaySession.create({
       restaurant: restaurantId,
@@ -1113,16 +1159,23 @@ router.get('/day-session/current', async (req, res, next) => {
   try {
     const restaurantId = req.restaurant._id;
     const branchId = req.headers['x-branch-id'] || req.query.branchId || null;
+    const { cutoffHour, invalid } = await resolveBranchAndCutoff(restaurantId, branchId);
+    if (invalid) {
+      return res.status(400).json({ message: 'Invalid branchId for this restaurant' });
+    }
 
     const session = await DaySession.findOne({
       restaurant: restaurantId,
       branch: branchId || null,
       status: 'OPEN',
-    }).lean();
+    });
 
     if (!session) {
       return res.json(null);
     }
+
+    await closeSessionIfPastCutoff(session, cutoffHour, null);
+    if (session.status === 'CLOSED') return res.json(null);
 
     // Aggregate sales and order count for the active session (exclude cancelled)
     const agg = await Order.aggregate([
@@ -1150,6 +1203,10 @@ router.post('/day-session/end', async (req, res, next) => {
   try {
     const restaurantId = req.restaurant._id;
     const branchId = req.body.branchId || req.headers['x-branch-id'] || null;
+    const { cutoffHour, invalid } = await resolveBranchAndCutoff(restaurantId, branchId);
+    if (invalid) {
+      return res.status(400).json({ message: 'Invalid branchId for this restaurant' });
+    }
 
     const session = await DaySession.findOne({
       restaurant: restaurantId,
@@ -1162,22 +1219,23 @@ router.post('/day-session/end', async (req, res, next) => {
     }
 
     const now = new Date();
+    await closeSessionIfPastCutoff(session, cutoffHour, null, now);
+    if (session.status === 'CLOSED') {
+      return res.json({
+        success: true,
+        message: 'Day session was auto-closed at reset time',
+        session: {
+          id: session._id.toString(),
+          startAt: session.startAt,
+          endAt: session.endAt,
+        },
+      });
+    }
+
     session.status = 'CLOSED';
     session.endAt = now;
     session.closedBy = req.user._id;
-
-    // Build human-readable key: "start - end"
-    const fmt = (d) =>
-      d.toLocaleString('en-PK', {
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit',
-        hour12: false,
-      });
-    session.sessionKey = `${fmt(session.startAt)} - ${fmt(session.endAt)}`;
+    session.sessionKey = buildSessionKey(session.startAt, session.endAt);
 
     await session.save();
 
