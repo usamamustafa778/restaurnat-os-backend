@@ -45,6 +45,7 @@ const mapRiderOrder = (order) => ({
   id: order.orderNumber || order._id.toString(),
   _id: order._id.toString(),
   orderNumber: order.orderNumber,
+  orderType: order.orderType || 'DELIVERY',
   status: order.status,
   customerName: order.customerName || '',
   customerPhone: order.customerPhone || '',
