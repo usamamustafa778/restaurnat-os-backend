@@ -2491,6 +2491,16 @@ function getCurrentBusinessDayStart(cutoffHour) {
   return start;
 }
 
+function isOrderPaid(order) {
+  if (!order) return false;
+  if (order.source === 'FOODPANDA') return true;
+  if (order.paymentAmountReceived != null && Number(order.paymentAmountReceived) > 0) return true;
+  const pm = String(order.paymentMethod || '').toUpperCase();
+  if (pm === 'CASH' || pm === 'CARD' || pm === 'ONLINE' || pm === 'FOODPANDA') return true;
+  if (String(order.orderType || '').toUpperCase() === 'DELIVERY' && order.deliveryPaymentCollected === true) return true;
+  return false;
+}
+
 // @route   GET /api/admin/reports/sales
 // @desc    Get sales report for a date range
 // @access  Restaurant Admin / Super Admin
@@ -2527,12 +2537,14 @@ router.get('/reports/sales', async (req, res, next) => {
       Reservation.find(reservationFilter).lean(),
     ]);
 
-    const orders = allOrders.filter(o => ['DELIVERED', 'COMPLETED'].includes(o.status));
+    const closedOrders = allOrders.filter(o => ['DELIVERED', 'COMPLETED'].includes(o.status));
+    const orders = closedOrders.filter((o) => isOrderPaid(o));
+    const unpaidClosedOrders = closedOrders.filter((o) => !isOrderPaid(o));
     const cancelledOrders = allOrders.filter(o => o.status === 'CANCELLED');
 
     let totalRevenue = 0;
     let totalProfit = 0;
-    let totalOrders = orders.length;
+    let totalOrders = closedOrders.length;
     const itemStats = new Map();
     const dailyMap = new Map(); // date YYYY-MM-DD -> total sales
     const paymentDistribution = {};
@@ -2617,6 +2629,8 @@ router.get('/reports/sales', async (req, res, next) => {
       }
     }
 
+    const unpaidAmount = unpaidClosedOrders.reduce((s, o) => s + (o.grandTotal ?? o.total), 0);
+
     // Daily sales for chart: one entry per day in [fromDate, toDate)
     const dailySales = [];
     const dayMs = 24 * 60 * 60 * 1000;
@@ -2656,6 +2670,9 @@ router.get('/reports/sales', async (req, res, next) => {
       totalDeliveryCharges,
       totalProfit: Math.round(totalProfit),
       totalOrders,
+      paidOrders: orders.length,
+      unpaidOrders: unpaidClosedOrders.length,
+      unpaidAmount: Math.round(unpaidAmount),
       topItems,
       dailySales,
       paymentDistribution,
@@ -2663,16 +2680,17 @@ router.get('/reports/sales', async (req, res, next) => {
 
     // Payment-wise breakdown (shape compatible with day-report paymentRows)
     const pmLabels = { CASH: 'Cash', CARD: 'Card', ONLINE: 'Online', OTHER: 'Other', PENDING: 'To be paid' };
+    const paidOrdersCount = orders.length;
     const paymentRows = Object.entries(paymentMethodMap).map(([m, d]) => ({
       method: pmLabels[m] || m,
       orders: d.orders,
       amount: Math.round(d.amount),
-      percent: totalOrders > 0 ? ((d.orders / totalOrders) * 100).toFixed(1) + '%' : '0%',
+      percent: paidOrdersCount > 0 ? ((d.orders / paidOrdersCount) * 100).toFixed(1) + '%' : '0%',
     }));
     if (paymentRows.length > 0) {
       paymentRows.push({
         method: 'Total',
-        orders: totalOrders,
+        orders: paidOrdersCount,
         amount: Math.round(totalRevenue),
         percent: '100%',
       });
@@ -2685,7 +2703,7 @@ router.get('/reports/sales', async (req, res, next) => {
       type: otLabels[t] || t,
       orders: d.orders,
       amount: Math.round(d.amount),
-      percent: totalOrders > 0 ? ((d.orders / totalOrders) * 100).toFixed(1) + '%' : '0%',
+      percent: paidOrdersCount > 0 ? ((d.orders / paidOrdersCount) * 100).toFixed(1) + '%' : '0%',
     }));
     payload.orderTypeRows = orderTypeRows;
 
@@ -2934,13 +2952,17 @@ router.get('/dashboard/summary', async (req, res, next) => {
     const sevenDaysAgo = new Date();
     sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
     sevenDaysAgo.setHours(cutoff, 0, 0, 0);
-    const orderFilterLast7 = { restaurant: restaurantId, status: 'DELIVERED', createdAt: { $gte: sevenDaysAgo, $lte: endOfDay } };
+    const orderFilterLast7 = {
+      restaurant: restaurantId,
+      status: { $in: ['DELIVERED', 'COMPLETED'] },
+      createdAt: { $gte: sevenDaysAgo, $lte: endOfDay },
+    };
     if (branchId) orderFilterLast7.branch = branchId;
 
     // Orders for the current month (completed only) for products performance
     const monthlyCompletedFilter = {
       restaurant: restaurantId,
-      status: 'DELIVERED',
+      status: { $in: ['DELIVERED', 'COMPLETED'] },
       createdAt: { $gte: startOfMonth, $lte: endOfDay },
     };
     if (branchId) monthlyCompletedFilter.branch = branchId;
@@ -2963,10 +2985,13 @@ router.get('/dashboard/summary', async (req, res, next) => {
       Category.find({ restaurant: restaurantId }),
     ]);
 
-    const completedOrders = allTodayOrders.filter(o => o.status === 'DELIVERED');
+    const closedOrders = allTodayOrders.filter((o) => ['DELIVERED', 'COMPLETED'].includes(o.status));
+    const completedOrders = closedOrders.filter((o) => isOrderPaid(o));
+    const unpaidClosedOrders = closedOrders.filter((o) => !isOrderPaid(o));
     const pendingOrders = pendingOrdersList;
     const todaysRevenue = completedOrders.reduce((s, o) => s + (o.grandTotal ?? o.total), 0);
-    const todaysOrdersCount = completedOrders.length;
+    const todaysOrdersCount = closedOrders.length;
+    const todaysUnpaidAmount = unpaidClosedOrders.reduce((s, o) => s + (o.grandTotal ?? o.total), 0);
 
     // Build inventory map for cost calculations
     const invMap = new Map();
@@ -3009,7 +3034,7 @@ router.get('/dashboard/summary', async (req, res, next) => {
     const salesTypeDistribution = {};
     const paymentDistribution = {};
     const sourceDistribution = {};
-    for (const o of completedLast7) {
+    for (const o of completedLast7.filter((x) => isOrderPaid(x))) {
       const t = o.orderType || 'DINE_IN';
       salesTypeDistribution[t] = (salesTypeDistribution[t] || 0) + 1;
       const m = o.paymentMethod || 'CASH';
@@ -3041,7 +3066,7 @@ router.get('/dashboard/summary', async (req, res, next) => {
 
     // Products performance: this month (completed orders only) so the table is richer
     const monthlyProductMap = new Map();
-    for (const o of completedThisMonth) {
+    for (const o of completedThisMonth.filter((x) => isOrderPaid(x))) {
       for (const item of o.items) {
         const key = item.menuItem ? item.menuItem.toString() : item.name;
         const existing = monthlyProductMap.get(key) || {
@@ -3069,6 +3094,9 @@ router.get('/dashboard/summary', async (req, res, next) => {
     res.json({
       todaysRevenue,
       todaysOrdersCount,
+      paidOrdersCount: completedOrders.length,
+      unpaidOrdersCount: unpaidClosedOrders.length,
+      todaysUnpaidAmount: Math.round(todaysUnpaidAmount),
       pendingOrdersCount: pendingOrders.length,
       totalBudgetCost: Math.round(totalBudgetCost),
       totalProfit: Math.round(todaysRevenue - totalBudgetCost),

@@ -13,6 +13,14 @@ const { protect, requireRole, requireRestaurant, checkSubscriptionStatus } = req
 const { generateOrderNumber } = require('../utils/orderNumber');
 const { getOrderRooms } = require('../utils/socketRooms');
 const CLOSED_ORDER_STATUSES = ['DELIVERED', 'COMPLETED'];
+const PAID_ORDER_MATCH = {
+  $or: [
+    { source: 'FOODPANDA' },
+    { paymentAmountReceived: { $gt: 0 } },
+    { paymentMethod: { $in: ['CASH', 'CARD', 'ONLINE', 'FOODPANDA'] } },
+    { $and: [{ orderType: 'DELIVERY' }, { deliveryPaymentCollected: true }] },
+  ],
+};
 
 function getExpectedSessionEndAt(startAt, cutoffHour = 4) {
   const start = new Date(startAt);
@@ -1206,6 +1214,7 @@ router.get('/day-session/current', async (req, res, next) => {
         $match: {
           daySession: session._id,
           status: { $in: CLOSED_ORDER_STATUSES },
+          ...PAID_ORDER_MATCH,
         },
       },
       { $group: { _id: null, totalSales: { $sum: { $ifNull: ['$grandTotal', '$total'] } }, totalOrders: { $sum: 1 } } },
@@ -1566,6 +1575,7 @@ router.get('/day-session/list', async (req, res, next) => {
             $match: {
               daySession: s._id,
               status: { $in: CLOSED_ORDER_STATUSES },
+              ...PAID_ORDER_MATCH,
             },
           },
           { $group: { _id: null, totalSales: { $sum: { $ifNull: ['$grandTotal', '$total'] } }, totalOrders: { $sum: 1 } } },
@@ -1641,6 +1651,7 @@ router.post('/day-session/bulk-orders', async (req, res, next) => {
             restaurant: restaurantId,
             daySession: { $in: validIds },
             status: { $in: CLOSED_ORDER_STATUSES },
+            ...PAID_ORDER_MATCH,
           },
         },
         {
@@ -1722,6 +1733,7 @@ router.get('/day-session/:sessionId/orders', async (req, res, next) => {
         $match: {
           daySession: session._id,
           status: { $in: CLOSED_ORDER_STATUSES },
+          ...PAID_ORDER_MATCH,
         },
       },
       {
