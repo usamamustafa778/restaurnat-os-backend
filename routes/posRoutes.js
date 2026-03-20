@@ -46,12 +46,6 @@ function isOrderPaid(order) {
   return false;
 }
 
-function getSessionOrderTimeFilter(session) {
-  const filter = { $gte: session.startAt };
-  filter.$lte = session.endAt || new Date();
-  return filter;
-}
-
 async function closeSessionIfPastCutoff(session, cutoffHour, closedBy = null, now = new Date()) {
   if (!session || session.status !== 'OPEN') return { closed: false, session };
   const expectedEndAt = getExpectedSessionEndAt(session.startAt, cutoffHour);
@@ -1211,7 +1205,6 @@ router.get('/day-session/current', async (req, res, next) => {
       {
         $match: {
           daySession: session._id,
-          createdAt: getSessionOrderTimeFilter(session),
           status: { $in: CLOSED_ORDER_STATUSES },
         },
       },
@@ -1567,13 +1560,11 @@ router.get('/day-session/list', async (req, res, next) => {
       sessions.map(async (s) => {
         const orderCount = await Order.countDocuments({
           daySession: s._id,
-          createdAt: getSessionOrderTimeFilter(s),
         });
         const totalsAgg = await Order.aggregate([
           {
             $match: {
               daySession: s._id,
-              createdAt: getSessionOrderTimeFilter(s),
               status: { $in: CLOSED_ORDER_STATUSES },
             },
           },
@@ -1634,15 +1625,11 @@ router.post('/day-session/bulk-orders', async (req, res, next) => {
     }
 
     const validIds = sessions.map((s) => s._id);
-    const sessionTimeOr = sessions.map((s) => ({
-      daySession: s._id,
-      createdAt: getSessionOrderTimeFilter(s),
-    }));
 
     const [orders, totalsAgg] = await Promise.all([
       Order.find({
         restaurant: restaurantId,
-        $or: sessionTimeOr,
+        daySession: { $in: validIds },
       })
         .sort({ createdAt: -1 })
         .populate('createdBy', 'name')
@@ -1652,7 +1639,7 @@ router.post('/day-session/bulk-orders', async (req, res, next) => {
         {
           $match: {
             restaurant: restaurantId,
-            $or: sessionTimeOr,
+            daySession: { $in: validIds },
             status: { $in: CLOSED_ORDER_STATUSES },
           },
         },
@@ -1725,7 +1712,6 @@ router.get('/day-session/:sessionId/orders', async (req, res, next) => {
     const orders = await Order.find({
       daySession: sessionId,
       restaurant: restaurantId,
-      createdAt: getSessionOrderTimeFilter(session),
     })
       .sort({ createdAt: -1 })
       .populate('createdBy', 'name')
@@ -1735,7 +1721,6 @@ router.get('/day-session/:sessionId/orders', async (req, res, next) => {
       {
         $match: {
           daySession: session._id,
-          createdAt: getSessionOrderTimeFilter(session),
           status: { $in: CLOSED_ORDER_STATUSES },
         },
       },
