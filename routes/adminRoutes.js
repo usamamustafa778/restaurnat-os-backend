@@ -486,6 +486,7 @@ const mapOrder = (order) => {
     cancelReason: order.cancelReason || null,
     cancelledAt: order.cancelledAt || null,
     cancelledBy: order.cancelledBy ? order.cancelledBy.toString() : null,
+    daySessionId: order.daySession ? order.daySession.toString() : null,
   };
 };
 
@@ -661,7 +662,19 @@ router.get('/orders', async (req, res, next) => {
       const openSessionIds = openSessions.map((s) => s._id);
       query.daySession = { $in: openSessionIds };
     }
-    if (req.query.from || req.query.to) {
+    if (req.query.daySessionId) {
+      const ds = await DaySession.findOne({
+        _id: req.query.daySessionId,
+        restaurant: restaurantId,
+      }).select('_id branch').lean();
+      if (!ds) {
+        return res.status(404).json({ message: 'Day session not found' });
+      }
+      if (branchId && String(ds.branch) !== String(branchId)) {
+        return res.status(400).json({ message: 'Day session does not match selected branch' });
+      }
+      query.daySession = ds._id;
+    } else if (req.query.from || req.query.to) {
       query.createdAt = {};
       if (req.query.from) query.createdAt.$gte = new Date(req.query.from);
       if (req.query.to) query.createdAt.$lte = new Date(req.query.to);
@@ -2508,29 +2521,55 @@ router.get('/reports/sales', async (req, res, next) => {
   try {
     const restaurantId = getRestaurantIdForRequest(req);
     const branchId = getBranchIdForRequest(req);
-    const { from, to } = req.query;
+    const { from, to, daySessionId } = req.query;
     const cutoff = req.branch?.businessDayCutoffHour ?? 0;
 
-    let fromDate, toDate;
-    if (from) {
-      fromDate = new Date(from);
+    let fromDate;
+    let toDate;
+    let sessionDoc = null;
+    let useSessionScope = false;
+
+    if (daySessionId) {
+      sessionDoc = await DaySession.findOne({ _id: daySessionId, restaurant: restaurantId });
+      if (!sessionDoc) {
+        return res.status(404).json({ message: 'Day session not found' });
+      }
+      if (branchId && String(sessionDoc.branch) !== String(branchId)) {
+        return res.status(400).json({ message: 'Day session does not match selected branch' });
+      }
+      useSessionScope = true;
+      fromDate = new Date(sessionDoc.startAt);
+      toDate = sessionDoc.endAt ? new Date(sessionDoc.endAt) : new Date();
     } else {
-      fromDate = getCurrentBusinessDayStart(cutoff);
-    }
-    if (to) {
-      toDate = new Date(to);
-    } else {
-      toDate = new Date();
+      if (from) {
+        fromDate = new Date(from);
+      } else {
+        fromDate = getCurrentBusinessDayStart(cutoff);
+      }
+      if (to) {
+        toDate = new Date(to);
+      } else {
+        toDate = new Date();
+      }
     }
 
-    const allOrderFilter = {
-      restaurant: restaurantId,
-      createdAt: { $gte: fromDate, $lte: toDate },
-    };
+    // Session scope: same orders as Business Day Report (daySession link), not createdAt window.
+    const allOrderFilter = useSessionScope
+      ? { restaurant: restaurantId, daySession: sessionDoc._id }
+      : {
+          restaurant: restaurantId,
+          createdAt: { $gte: fromDate, $lte: toDate },
+        };
     if (branchId) allOrderFilter.branch = branchId;
+    if (useSessionScope && !branchId && sessionDoc.branch) {
+      allOrderFilter.branch = sessionDoc.branch;
+    }
 
     const reservationFilter = { restaurant: restaurantId, date: { $gte: fromDate, $lte: toDate } };
     if (branchId) reservationFilter.branch = branchId;
+    if (useSessionScope && !branchId && sessionDoc.branch) {
+      reservationFilter.branch = sessionDoc.branch;
+    }
 
     const [allOrders, periodReservations] = await Promise.all([
       Order.find(allOrderFilter),
@@ -2551,7 +2590,9 @@ router.get('/reports/sales', async (req, res, next) => {
     const paymentMethodMap = {}; // for paymentRows
     const orderTypeMap = {}; // for orderTypeRows
     const paymentAccountMap = {}; // for ONLINE account breakdown by paymentProvider
-    const isSingleDay = toDate.getTime() - fromDate.getTime() <= 24 * 60 * 60 * 1000;
+    const rangeMs = toDate.getTime() - fromDate.getTime();
+    const isSingleDay =
+      useSessionScope || rangeMs <= 36 * 60 * 60 * 1000;
     const hourlySales = isSingleDay ? new Array(24).fill(0) : null;
 
     // Always recompute profit from revenue and cost so report is consistent (not relying on possibly wrong stored order.profit)
@@ -2666,6 +2707,8 @@ router.get('/reports/sales', async (req, res, next) => {
     const payload = {
       from: fromDate,
       to: toDate,
+      scope: useSessionScope ? 'daySession' : 'createdAt',
+      daySessionId: useSessionScope ? sessionDoc._id.toString() : undefined,
       totalRevenue,
       totalDeliveryCharges,
       totalProfit: Math.round(totalProfit),
@@ -2943,11 +2986,26 @@ router.get('/dashboard/summary', async (req, res, next) => {
     startOfMonth.setDate(1);
     startOfMonth.setHours(0, 0, 0, 0);
 
-    const orderFilter = { restaurant: restaurantId, createdAt: { $gte: startOfDay, $lte: endOfDay } };
-    if (branchId) orderFilter.branch = branchId;
+    // Align "today" with Business Day Report: use OPEN DaySession when present (daySession link), not calendar createdAt.
+    let openSessionForToday = null;
+    if (branchId) {
+      openSessionForToday = await DaySession.findOne({
+        restaurant: restaurantId,
+        branch: branchId,
+        status: 'OPEN',
+      })
+        .select('_id startAt')
+        .lean();
+    }
+
+    const orderFilter = openSessionForToday
+      ? { restaurant: restaurantId, branch: branchId, daySession: openSessionForToday._id }
+      : { restaurant: restaurantId, createdAt: { $gte: startOfDay, $lte: endOfDay } };
+    if (!openSessionForToday && branchId) orderFilter.branch = branchId;
 
     const pendingFilter = { restaurant: restaurantId, status: { $in: ['NEW_ORDER', 'PROCESSING', 'READY'] } };
     if (branchId) pendingFilter.branch = branchId;
+    if (openSessionForToday) pendingFilter.daySession = openSessionForToday._id;
 
     const sevenDaysAgo = new Date();
     sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
@@ -3092,6 +3150,8 @@ router.get('/dashboard/summary', async (req, res, next) => {
       }));
 
     res.json({
+      todayScope: openSessionForToday ? 'daySession' : 'cutoff',
+      daySessionId: openSessionForToday ? openSessionForToday._id.toString() : null,
       todaysRevenue,
       todaysOrdersCount,
       paidOrdersCount: completedOrders.length,
