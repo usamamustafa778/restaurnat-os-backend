@@ -95,6 +95,84 @@ function setCacheHeaders(res, maxAge = 60, swr = 300) {
 }
 
 // ---------------------------------------------------------------------------
+// GET /api/storefront/directory — public list for food hub (nearby / discovery)
+// Must be registered before /:slug/* so "directory" is not treated as a slug.
+// ---------------------------------------------------------------------------
+router.get(
+  '/directory',
+  rateLimit({ windowMs: 60000, max: 60 }),
+  async (req, res, next) => {
+    try {
+      const q = String(req.query.q || '')
+        .trim()
+        .toLowerCase();
+      const city = String(req.query.city || '')
+        .trim()
+        .toLowerCase();
+
+      const filter = {
+        isDeleted: { $ne: true },
+        'website.isPublic': true,
+        'website.subdomain': { $exists: true, $nin: [null, ''] },
+        'subscription.status': { $nin: ['SUSPENDED', 'EXPIRED'] },
+      };
+
+      let restaurants = await Restaurant.find(filter)
+        .select('website subscription')
+        .lean()
+        .limit(300);
+
+      const branchList = await Branch.find({
+        restaurant: { $in: restaurants.map((r) => r._id) },
+        status: 'active',
+      })
+        .sort({ sortOrder: 1, createdAt: 1 })
+        .select('restaurant name address')
+        .lean();
+
+      const branchByRestaurant = new Map();
+      for (const b of branchList) {
+        const rid = b.restaurant.toString();
+        if (!branchByRestaurant.has(rid)) branchByRestaurant.set(rid, b);
+      }
+
+      const rows = [];
+      for (const r of restaurants) {
+        const w = r.website || {};
+        const slug = (w.subdomain || '').toLowerCase().trim();
+        if (!slug || slug === 'food' || slug === 'www') continue;
+
+        const b = branchByRestaurant.get(r._id.toString());
+        const address = (b && b.address) || w.address || '';
+        const name = w.name || slug;
+
+        const blob = [name, address, w.tagline || '', w.description || '', slug].join(' ').toLowerCase();
+        if (q && !blob.includes(q)) continue;
+        if (city && !address.toLowerCase().includes(city)) continue;
+
+        rows.push({
+          slug,
+          name,
+          tagline: w.tagline || '',
+          logoUrl: w.logoUrl || null,
+          bannerUrl: w.bannerUrl || null,
+          address: address || w.address || '',
+          branchName: b?.name || '',
+          allowWebsiteOrders: w.allowWebsiteOrders !== false,
+        });
+      }
+
+      rows.sort((a, b) => a.name.localeCompare(b.name));
+
+      setCacheHeaders(res, 60, 180);
+      res.json({ restaurants: rows });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
 // GET /api/storefront/:slug/config
 // ---------------------------------------------------------------------------
 router.get(
