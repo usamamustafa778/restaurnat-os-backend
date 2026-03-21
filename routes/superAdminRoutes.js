@@ -3,7 +3,47 @@ const Restaurant = require('../models/Restaurant');
 const User = require('../models/User');
 const Branch = require('../models/Branch');
 const Lead = require('../models/Lead');
+const Order = require('../models/Order');
+const MenuItem = require('../models/MenuItem');
 const { protect, requireRole } = require('../middleware/authMiddleware');
+
+/** Heuristic for super-admin: who is “really” using the product vs signups only. */
+function computeEngagement({ ordersLast30Days, ordersLifetime, createdAt, menuItemsCount }) {
+  const ageDays = (Date.now() - new Date(createdAt).getTime()) / 86400000;
+  if (ordersLast30Days >= 1) {
+    return {
+      key: 'active',
+      label: 'Active',
+      description: 'At least one order recorded in the last 30 days (POS / website / integrations).',
+    };
+  }
+  if (ordersLifetime >= 1) {
+    return {
+      key: 'quiet',
+      label: 'Quiet',
+      description: 'Has order history but nothing in the last 30 days — follow up or seasonal.',
+    };
+  }
+  if (ageDays <= 14) {
+    return {
+      key: 'new',
+      label: 'New',
+      description: 'Signed up recently; no orders yet (normal while onboarding).',
+    };
+  }
+  if (menuItemsCount >= 3) {
+    return {
+      key: 'configured',
+      label: 'Configured',
+      description: 'Menu has items but no orders — may need training or go-live push.',
+    };
+  }
+  return {
+    key: 'dormant',
+    label: 'Dormant',
+    description: 'No orders and minimal setup — likely churned or stuck in signup.',
+  };
+}
 
 const router = express.Router();
 
@@ -115,6 +155,133 @@ router.get('/restaurants', async (req, res, next) => {
         createdAt: r.createdAt,
       }))
     );
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @route   GET /api/super/restaurants/activity-summary
+// @desc    Per-tenant usage: orders, revenue, setup counts — for platform health / engagement
+// @access  Super Admin
+router.get('/restaurants/activity-summary', async (req, res, next) => {
+  try {
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+
+    const restaurants = await Restaurant.find({ isDeleted: { $ne: true } })
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const [orderStats, menuCounts, branchCounts, userCounts] = await Promise.all([
+      Order.aggregate([
+        {
+          $group: {
+            _id: '$restaurant',
+            ordersLifetime: { $sum: 1 },
+            lastOrderAt: { $max: '$createdAt' },
+            ordersLast7Days: {
+              $sum: { $cond: [{ $gte: ['$createdAt', sevenDaysAgo] }, 1, 0] },
+            },
+            ordersLast30Days: {
+              $sum: { $cond: [{ $gte: ['$createdAt', thirtyDaysAgo] }, 1, 0] },
+            },
+            revenueLast30Days: {
+              $sum: {
+                $cond: [{ $gte: ['$createdAt', thirtyDaysAgo] }, { $ifNull: ['$total', 0] }, 0],
+              },
+            },
+            websiteOrdersLast30Days: {
+              $sum: {
+                $cond: [
+                  {
+                    $and: [{ $gte: ['$createdAt', thirtyDaysAgo] }, { $eq: ['$source', 'WEBSITE'] }],
+                  },
+                  1,
+                  0,
+                ],
+              },
+            },
+          },
+        },
+      ]),
+      MenuItem.aggregate([
+        { $group: { _id: '$restaurant', menuItemsCount: { $sum: 1 } } },
+      ]),
+      Branch.aggregate([
+        { $match: { isDeleted: { $ne: true } } },
+        { $group: { _id: '$restaurant', branchesCount: { $sum: 1 } } },
+      ]),
+      User.aggregate([
+        {
+          $match: {
+            restaurant: { $exists: true, $ne: null },
+            role: { $ne: 'super_admin' },
+          },
+        },
+        { $group: { _id: '$restaurant', teamMembersCount: { $sum: 1 } } },
+      ]),
+    ]);
+
+    const orderMap = new Map(orderStats.map((o) => [o._id.toString(), o]));
+    const menuMap = new Map(menuCounts.map((m) => [m._id.toString(), m.menuItemsCount]));
+    const branchMap = new Map(branchCounts.map((b) => [b._id.toString(), b.branchesCount]));
+    const userMap = new Map(userCounts.map((u) => [u._id.toString(), u.teamMembersCount]));
+
+    const rows = restaurants.map((r) => {
+      const id = r._id.toString();
+      const o = orderMap.get(id);
+      const ordersLast7Days = o?.ordersLast7Days ?? 0;
+      const ordersLast30Days = o?.ordersLast30Days ?? 0;
+      const ordersLifetime = o?.ordersLifetime ?? 0;
+      const lastOrderAt = o?.lastOrderAt ? o.lastOrderAt.toISOString() : null;
+      const revenueLast30Days = Math.round((o?.revenueLast30Days ?? 0) * 100) / 100;
+      const websiteOrdersLast30Days = o?.websiteOrdersLast30Days ?? 0;
+      const menuItemsCount = menuMap.get(id) ?? 0;
+      const branchesCount = branchMap.get(id) ?? 0;
+      const teamMembersCount = userMap.get(id) ?? 0;
+
+      const engagement = computeEngagement({
+        ordersLast30Days,
+        ordersLifetime,
+        createdAt: r.createdAt,
+        menuItemsCount,
+      });
+
+      return {
+        id,
+        website: r.website,
+        subscription: r.subscription,
+        createdAt: r.createdAt,
+        activity: {
+          ordersLast7Days,
+          ordersLast30Days,
+          ordersLifetime,
+          lastOrderAt,
+          revenueLast30Days,
+          websiteOrdersLast30Days,
+          menuItemsCount,
+          branchesCount,
+          teamMembersCount,
+        },
+        engagement,
+      };
+    });
+
+    const engaged30 = rows.filter((x) => x.activity.ordersLast30Days >= 1).length;
+    const everOrdered = rows.filter((x) => x.activity.ordersLifetime >= 1).length;
+    const noOrders = rows.filter((x) => x.activity.ordersLifetime === 0).length;
+
+    res.json({
+      generatedAt: new Date().toISOString(),
+      summary: {
+        totalRestaurants: rows.length,
+        engagedLast30Days: engaged30,
+        everHadOrders: everOrdered,
+        neverHadOrders: noOrders,
+        quietHadOrdersBefore: Math.max(0, everOrdered - engaged30),
+      },
+      restaurants: rows,
+    });
   } catch (error) {
     next(error);
   }
