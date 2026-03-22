@@ -179,6 +179,7 @@ router.post('/register-restaurant', async (req, res, next) => {
   try {
     const {
       restaurantName,
+      subdomain: requestedSubdomain,
       ownerName,
       email,
       password,
@@ -188,8 +189,8 @@ router.post('/register-restaurant', async (req, res, next) => {
 
     // Validate required fields
     if (!restaurantName || !ownerName || !email || !password) {
-      return res.status(400).json({ 
-        message: 'Please provide restaurant name, owner name, email, and password' 
+      return res.status(400).json({
+        message: 'Please provide restaurant name, owner name, email, and password',
       });
     }
 
@@ -199,14 +200,39 @@ router.post('/register-restaurant', async (req, res, next) => {
       });
     }
 
-    // Auto-generate unique subdomain from restaurant name
+    // Resolve subdomain: use requested if valid, else auto-generate
     const slugify = (v) => v.toString().trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').substring(0, 50);
-    let baseSlug = slugify(restaurantName);
-    if (!baseSlug) baseSlug = 'restaurant';
-    let subdomain = baseSlug;
-    let slugCounter = 2;
-    while (await Restaurant.findOne({ 'website.subdomain': subdomain })) {
-      subdomain = `${baseSlug}-${slugCounter++}`;
+    let subdomain;
+
+    if (requestedSubdomain && typeof requestedSubdomain === 'string') {
+      const clean = requestedSubdomain.trim().toLowerCase().replace(/[^a-z0-9-]/g, '');
+      if (clean.length < 2) {
+        return res.status(400).json({ message: 'Subdomain must be at least 2 characters.' });
+      }
+      if (clean.length > 50) {
+        return res.status(400).json({ message: 'Subdomain must be 50 characters or less.' });
+      }
+      if (/^-|-$/.test(clean)) {
+        return res.status(400).json({ message: 'Subdomain cannot start or end with a hyphen.' });
+      }
+      const exists = await Restaurant.findOne({
+        'website.subdomain': clean,
+        isDeleted: { $ne: true },
+      });
+      if (exists) {
+        return res.status(400).json({ message: `${clean}.eatsdesk.app is already in use. Please choose another subdomain.` });
+      }
+      subdomain = clean;
+    }
+
+    if (!subdomain) {
+      let baseSlug = slugify(restaurantName);
+      if (!baseSlug) baseSlug = 'restaurant';
+      subdomain = baseSlug;
+      let slugCounter = 2;
+      while (await Restaurant.findOne({ 'website.subdomain': subdomain })) {
+        subdomain = `${baseSlug}-${slugCounter++}`;
+      }
     }
 
     // Check if email is already registered
