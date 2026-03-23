@@ -840,7 +840,6 @@ router.put('/orders/:id/status', async (req, res, next) => {
     }
 
     const previousStatus = order.status;
-    const previousStatus = order.status;
     order.status = status;
     if (!order.statusHistory) order.statusHistory = [];
     order.statusHistory.push({ status, at: new Date() });
