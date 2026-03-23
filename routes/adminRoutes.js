@@ -839,11 +839,78 @@ router.put('/orders/:id/status', async (req, res, next) => {
       return res.status(400).json({ message: 'Delivery orders must be assigned to a rider before marking as delivered. Use the assign-rider endpoint.' });
     }
 
+    const previousStatus = order.status;
+    const previousStatus = order.status;
     order.status = status;
     if (!order.statusHistory) order.statusHistory = [];
     order.statusHistory.push({ status, at: new Date() });
 
     if (status === 'CANCELLED') {
+      // Reverse inventory only on first transition to CANCELLED.
+      // Prevents accidental double-restock if an already-cancelled order is updated again.
+      if (previousStatus !== 'CANCELLED') {
+        const menuItemIds = Array.from(
+          new Set(
+            (order.items || [])
+              .map((i) => i.menuItem?.toString?.())
+              .filter(Boolean)
+          )
+        );
+        if (menuItemIds.length > 0) {
+          const menuItems = await MenuItem.find({
+            _id: { $in: menuItemIds },
+            restaurant: restaurantId,
+          }).lean();
+          const menuMap = new Map(menuItems.map((m) => [m._id.toString(), m]));
+
+          const consumptionByInventoryId = new Map();
+          for (const orderItem of (order.items || [])) {
+            const menuItemId = orderItem.menuItem?.toString?.();
+            if (!menuItemId) continue;
+            const menu = menuMap.get(menuItemId);
+            if (!menu?.inventoryConsumptions?.length) continue;
+
+            for (const cons of menu.inventoryConsumptions) {
+              const invId = cons.inventoryItem?.toString?.();
+              if (!invId) continue;
+              const qty = (cons.quantity || 0) * (orderItem.quantity || 0);
+              if (qty <= 0) continue;
+              consumptionByInventoryId.set(
+                invId,
+                (consumptionByInventoryId.get(invId) || 0) + qty
+              );
+            }
+          }
+
+          if (consumptionByInventoryId.size > 0) {
+            if (order.branch) {
+              await Promise.all(
+                Array.from(consumptionByInventoryId.entries()).map(([invId, qty]) =>
+                  BranchInventory.findOneAndUpdate(
+                    { branch: order.branch, inventoryItem: invId },
+                    { $inc: { currentStock: qty } },
+                    { upsert: false }
+                  )
+                )
+              );
+            } else {
+              const inventoryIds = Array.from(consumptionByInventoryId.keys());
+              const inventoryItems = await InventoryItem.find({
+                _id: { $in: inventoryIds },
+                restaurant: restaurantId,
+              });
+              await Promise.all(
+                inventoryItems.map((inv) => {
+                  const qty = consumptionByInventoryId.get(inv._id.toString()) || 0;
+                  inv.currentStock += qty;
+                  return inv.save();
+                })
+              );
+            }
+          }
+        }
+      }
+
       if (cancelReason && String(cancelReason).trim()) {
         order.cancelReason = String(cancelReason).trim();
       }
@@ -3668,6 +3735,71 @@ router.put('/kitchen/orders/:id/status', async (req, res, next) => {
     order.statusHistory.push({ status, at: new Date() });
 
     if (status === 'CANCELLED') {
+      // Reverse inventory only on first transition to CANCELLED.
+      // Prevents accidental double-restock if an already-cancelled order is updated again.
+      if (previousStatus !== 'CANCELLED') {
+        const menuItemIds = Array.from(
+          new Set(
+            (order.items || [])
+              .map((i) => i.menuItem?.toString?.())
+              .filter(Boolean)
+          )
+        );
+        if (menuItemIds.length > 0) {
+          const menuItems = await MenuItem.find({
+            _id: { $in: menuItemIds },
+            restaurant: restaurantId,
+          }).lean();
+          const menuMap = new Map(menuItems.map((m) => [m._id.toString(), m]));
+
+          const consumptionByInventoryId = new Map();
+          for (const orderItem of (order.items || [])) {
+            const menuItemId = orderItem.menuItem?.toString?.();
+            if (!menuItemId) continue;
+            const menu = menuMap.get(menuItemId);
+            if (!menu?.inventoryConsumptions?.length) continue;
+
+            for (const cons of menu.inventoryConsumptions) {
+              const invId = cons.inventoryItem?.toString?.();
+              if (!invId) continue;
+              const qty = (cons.quantity || 0) * (orderItem.quantity || 0);
+              if (qty <= 0) continue;
+              consumptionByInventoryId.set(
+                invId,
+                (consumptionByInventoryId.get(invId) || 0) + qty
+              );
+            }
+          }
+
+          if (consumptionByInventoryId.size > 0) {
+            if (order.branch) {
+              await Promise.all(
+                Array.from(consumptionByInventoryId.entries()).map(([invId, qty]) =>
+                  BranchInventory.findOneAndUpdate(
+                    { branch: order.branch, inventoryItem: invId },
+                    { $inc: { currentStock: qty } },
+                    { upsert: false }
+                  )
+                )
+              );
+            } else {
+              const inventoryIds = Array.from(consumptionByInventoryId.keys());
+              const inventoryItems = await InventoryItem.find({
+                _id: { $in: inventoryIds },
+                restaurant: restaurantId,
+              });
+              await Promise.all(
+                inventoryItems.map((inv) => {
+                  const qty = consumptionByInventoryId.get(inv._id.toString()) || 0;
+                  inv.currentStock += qty;
+                  return inv.save();
+                })
+              );
+            }
+          }
+        }
+      }
+
       if (cancelReason && String(cancelReason).trim()) {
         order.cancelReason = String(cancelReason).trim();
       }
