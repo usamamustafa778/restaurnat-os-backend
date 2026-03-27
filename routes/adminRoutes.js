@@ -177,49 +177,62 @@ async function vercelProjectRequest(path, { method = 'GET', body } = {}) {
 function collectVercelDnsRecords(domainData = {}) {
   const list = [];
 
+  const inferTypeFromValue = (value) => {
+    const v = String(value || '').trim().toLowerCase();
+    if (!v) return '';
+    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(v)) return 'A';
+    if (v.includes('vercel-dns.com') || v.endsWith('.com.') || v.endsWith('.net.')) return 'CNAME';
+    return 'TXT';
+  };
+
   const pushRecord = (r) => {
     if (!r || typeof r !== 'object') return;
-    const type = String(r.type || r.recordType || '').toUpperCase();
-    const name = r.name || r.domain || r.host || r.record || '';
-    const value = r.value || r.target || r.data || r.pointsTo || r.ip || '';
-    if (!type && !name && !value) return;
-    list.push({
-      type: type || 'TXT',
-      domain: String(name || ''),
-      value: String(value || ''),
-      reason: r.reason || null,
+    const rawType = String(r.type || r.recordType || '').toUpperCase();
+    const rawName = r.name || r.domain || r.host || r.record || '';
+    const rawValue = r.value || r.target || r.data || r.pointsTo || r.ip || '';
+    const values = Array.isArray(rawValue)
+      ? rawValue
+      : typeof rawValue === 'string' && rawValue.includes(',')
+        ? rawValue
+            .split(',')
+            .map((v) => v.trim())
+            .filter(Boolean)
+        : [rawValue];
+
+    values.forEach((v) => {
+      const inferredType = rawType || inferTypeFromValue(v);
+      const inferredName =
+        rawName ||
+        (inferredType === 'A' || inferredType === 'CNAME'
+          ? '@'
+          : '_vercel');
+      if (!inferredType && !inferredName && !v) return;
+      list.push({
+        type: inferredType || 'TXT',
+        domain: String(inferredName || ''),
+        value: String(v || ''),
+        reason: r.reason || null,
+      });
     });
   };
 
-  // Known top-level arrays first.
+  // Use DNS-oriented arrays only. Avoid deep scanning unrelated config objects.
   [
     domainData?.verification,
     domainData?.dnsRecords,
     domainData?.records,
     domainData?.recommendedRecords,
     domainData?.conflicts,
+    domainData?.misconfigured,
+    domainData?.missing,
+    domainData?.config?.records,
+    domainData?.config?.conflicts,
+    domainData?.config?.misconfigured,
+    domainData?.config?.missing,
   ].forEach((arr) => {
     if (!Array.isArray(arr)) return;
     arr.forEach(pushRecord);
   });
-
-  // Deep scan config payload because Vercel shape differs by endpoint/version.
-  const visited = new Set();
-  const scan = (node, depth = 0) => {
-    if (!node || depth > 5) return;
-    if (typeof node !== 'object') return;
-    if (visited.has(node)) return;
-    visited.add(node);
-
-    if (Array.isArray(node)) {
-      node.forEach((child) => scan(child, depth + 1));
-      return;
-    }
-
-    pushRecord(node);
-    Object.keys(node).forEach((k) => scan(node[k], depth + 1));
-  };
-  scan(domainData?.config || {});
 
   const unique = [];
   const seen = new Set();
