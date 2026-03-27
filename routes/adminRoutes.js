@@ -237,7 +237,10 @@ async function connectDomainOnVercel(domain) {
       [];
     return {
       ok: false,
-      message: addResult.message,
+      message:
+        addResult.status === 409
+          ? 'Domain already exists in Vercel records (or is pending cleanup). Use Refresh/Verify, and if needed remove it from Vercel then retry after propagation.'
+          : addResult.message,
       status: {
         name: domain,
         verified: false,
@@ -262,18 +265,14 @@ async function connectDomainOnVercel(domain) {
   if (!statusResult.ok) {
     return {
       ok: true,
-      message: alreadyExists
-        ? 'Domain exists on Vercel project but status could not be fetched.'
-        : 'Domain connected on Vercel project.',
+      message: 'Domain connected on Vercel project, but status could not be fetched.',
       status: null,
     };
   }
 
   return {
     ok: true,
-    message: alreadyExists
-      ? 'Domain already exists on Vercel project.'
-      : 'Domain connected on Vercel project.',
+    message: 'Domain connected on Vercel project.',
     status: {
       name: statusResult.data?.name || domain,
       verified: statusResult.data?.verified === true,
