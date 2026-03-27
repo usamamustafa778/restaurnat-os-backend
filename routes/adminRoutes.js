@@ -182,17 +182,33 @@ async function connectDomainOnVercel(domain) {
     body: { name: domain },
   });
 
-  const alreadyExists =
-    !addResult.ok &&
-    (addResult.status === 409 ||
-      /already/i.test(addResult.message || '') ||
-      /in use/i.test(addResult.message || ''));
+  // If add failed, first check whether domain is already attached to this project.
+  if (!addResult.ok) {
+    const existingStatus = await getDomainStatusFromVercel(domain);
+    if (existingStatus) {
+      return {
+        ok: true,
+        message: 'Domain already exists on Vercel project.',
+        status: existingStatus,
+      };
+    }
 
-  if (!addResult.ok && !alreadyExists) {
+    const verification =
+      addResult.data?.error?.domain?.verification ||
+      addResult.data?.domain?.verification ||
+      addResult.data?.verification ||
+      [];
     return {
       ok: false,
       message: addResult.message,
-      status: null,
+      status: {
+        name: domain,
+        verified: false,
+        verification: Array.isArray(verification) ? verification : [],
+        apexName: null,
+        redirect: null,
+      },
+      conflict: addResult.status === 409,
     };
   }
 
@@ -234,6 +250,33 @@ async function removeDomainFromVercel(domain) {
   await vercelProjectRequest(`/v9/projects/${projectId}/domains/${encodeURIComponent(domain)}`, {
     method: 'DELETE',
   });
+}
+
+async function getDomainStatusFromVercel(domain) {
+  const { projectId, token } = getVercelProjectConfig();
+  if (!token || !projectId || !domain) return null;
+  const statusResult = await vercelProjectRequest(
+    `/v9/projects/${projectId}/domains/${encodeURIComponent(domain)}`
+  );
+  if (!statusResult.ok) return null;
+  return {
+    name: statusResult.data?.name || domain,
+    verified: statusResult.data?.verified === true,
+    verification: statusResult.data?.verification || [],
+    apexName: statusResult.data?.apexName || null,
+    redirect: statusResult.data?.redirect || null,
+  };
+}
+
+async function isCustomDomainUsedByAnotherRestaurant(domain, restaurantId) {
+  if (!domain) return false;
+  const existing = await Restaurant.findOne({
+    _id: { $ne: restaurantId },
+    'website.customDomain': domain,
+  })
+    .select('_id name website.subdomain')
+    .lean();
+  return existing || null;
 }
 
 const generateUniqueBranchCode = async (restaurantId, baseName) => {
@@ -2373,6 +2416,22 @@ router.get('/website', async (req, res, next) => {
       });
     }
 
+    const normalizedCustomDomain = normalizeCustomDomain(merged.customDomain);
+    if (normalizedCustomDomain) {
+      const status = await getDomainStatusFromVercel(normalizedCustomDomain);
+      merged.customDomain = normalizedCustomDomain;
+      merged.customDomainConnection = {
+        connected: true,
+        domain: normalizedCustomDomain,
+        message: status
+          ? status.verified
+            ? 'Domain verified on Vercel project.'
+            : 'Domain added on Vercel project. DNS verification pending.'
+          : 'Domain is configured. Unable to fetch live Vercel status right now.',
+        status,
+      };
+    }
+
     res.json(merged);
   } catch (error) {
     next(error);
@@ -2677,10 +2736,23 @@ router.put('/website', async (req, res, next) => {
       const normalizedDomain = normalizeCustomDomain(customDomain);
 
       if (normalizedDomain) {
+        const takenByOtherTenant = await isCustomDomainUsedByAnotherRestaurant(normalizedDomain, restaurantId);
+        if (takenByOtherTenant) {
+          return res.status(409).json({
+            message: `This domain is already connected to another tenant (${takenByOtherTenant.name || 'restaurant'}).`,
+          });
+        }
+
         const integration = await connectDomainOnVercel(normalizedDomain);
         if (!integration.ok) {
-          return res.status(502).json({
+          return res.status(integration.conflict ? 409 : 502).json({
             message: integration.message || 'Failed to connect domain with Vercel',
+            customDomainConnection: {
+              connected: false,
+              domain: normalizedDomain,
+              message: integration.message || 'Domain connection failed.',
+              status: integration.status || null,
+            },
           });
         }
 
