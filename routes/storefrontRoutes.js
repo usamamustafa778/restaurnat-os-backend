@@ -173,6 +173,51 @@ router.get(
 );
 
 // ---------------------------------------------------------------------------
+// GET /api/storefront/resolve-host — map custom domain → tenant subdomain (middleware)
+// Must be registered before /:slug/* so "resolve-host" is not treated as a slug.
+// ---------------------------------------------------------------------------
+function normalizeHostForLookup(h) {
+  let v = String(h || '')
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, '');
+  const colon = v.indexOf(':');
+  if (colon !== -1) v = v.slice(0, colon);
+  if (v.startsWith('www.')) v = v.slice(4);
+  return v;
+}
+
+router.get(
+  '/resolve-host',
+  rateLimit({ windowMs: 60000, max: 120 }),
+  async (req, res, next) => {
+    try {
+      const raw = String(req.query.host || req.headers['x-forwarded-host'] || '').trim();
+      const host = normalizeHostForLookup(raw);
+      if (!host) return res.status(400).json({ message: 'host query parameter is required' });
+
+      const candidates = [host];
+      if (!host.startsWith('www.')) candidates.push(`www.${host}`);
+
+      const restaurant = await Restaurant.findOne({
+        isDeleted: { $ne: true },
+        'website.customDomain': { $in: candidates },
+      })
+        .select('website.subdomain')
+        .lean();
+
+      const slug = (restaurant?.website?.subdomain || '').toLowerCase().trim();
+      if (!slug) return res.status(404).json({ message: 'No restaurant for this host' });
+
+      setCacheHeaders(res, 30, 120);
+      return res.json({ subdomain: slug });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
 // GET /api/storefront/:slug/config
 // ---------------------------------------------------------------------------
 router.get(
