@@ -16,8 +16,25 @@ const CLOSED_ORDER_STATUSES = ['DELIVERED', 'COMPLETED'];
 const PAID_ORDER_MATCH = {
   $or: [
     { source: 'FOODPANDA' },
-    { paymentAmountReceived: { $gt: 0 } },
-    { paymentMethod: { $in: ['CASH', 'CARD', 'ONLINE', 'FOODPANDA'] } },
+    {
+      $expr: {
+        $gte: [
+          {
+            $subtract: [
+              { $ifNull: ['$paymentAmountReceived', 0] },
+              { $ifNull: ['$paymentAmountReturned', 0] },
+            ],
+          },
+          {
+            $add: [
+              { $ifNull: ['$total', 0] },
+              { $ifNull: ['$deliveryCharges', 0] },
+            ],
+          },
+        ],
+      },
+    },
+    { paymentMethod: { $in: ['CASH', 'CARD', 'ONLINE', 'SPLIT', 'FOODPANDA'] } },
     { $and: [{ orderType: 'DELIVERY' }, { deliveryPaymentCollected: true }] },
   ],
 };
@@ -47,9 +64,14 @@ function buildSessionKey(startAt, endAt) {
 function isOrderPaid(order) {
   if (!order) return false;
   if (order.source === 'FOODPANDA') return true;
-  if (order.paymentAmountReceived != null && Number(order.paymentAmountReceived) > 0) return true;
+  if (order.paymentAmountReceived != null) {
+    const gross = Number(order.paymentAmountReceived) || 0;
+    const returned = Number(order.paymentAmountReturned) || 0;
+    const totalDue = Number(order.grandTotal ?? order.total ?? 0) || 0;
+    if (gross - returned >= totalDue) return true;
+  }
   const pm = String(order.paymentMethod || '').toUpperCase();
-  if (pm === 'CASH' || pm === 'CARD' || pm === 'ONLINE' || pm === 'FOODPANDA') return true;
+  if (pm === 'CASH' || pm === 'CARD' || pm === 'ONLINE' || pm === 'SPLIT' || pm === 'FOODPANDA') return true;
   if (String(order.orderType || '').toUpperCase() === 'DELIVERY' && order.deliveryPaymentCollected === true) return true;
   return false;
 }
@@ -1662,8 +1684,22 @@ router.post('/day-session/bulk-orders', async (req, res, next) => {
             totalDiscount: { $sum: '$discountAmount' },
             totalProfit: { $sum: '$profit' },
             totalDeliveryCharges: { $sum: { $ifNull: ['$deliveryCharges', 0] } },
-            cashSales: { $sum: { $cond: [{ $eq: ['$paymentMethod', 'CASH'] }, { $ifNull: ['$grandTotal', '$total'] }, 0] } },
-            cardSales: { $sum: { $cond: [{ $eq: ['$paymentMethod', 'CARD'] }, { $ifNull: ['$grandTotal', '$total'] }, 0] } },
+            cashSales: {
+              $sum: {
+                $add: [
+                  { $cond: [{ $eq: ['$paymentMethod', 'CASH'] }, { $ifNull: ['$grandTotal', '$total'] }, 0] },
+                  { $cond: [{ $eq: ['$paymentMethod', 'SPLIT'] }, { $ifNull: ['$splitCashAmount', 0] }, 0] },
+                ],
+              },
+            },
+            cardSales: {
+              $sum: {
+                $add: [
+                  { $cond: [{ $eq: ['$paymentMethod', 'CARD'] }, { $ifNull: ['$grandTotal', '$total'] }, 0] },
+                  { $cond: [{ $eq: ['$paymentMethod', 'SPLIT'] }, { $ifNull: ['$splitCardAmount', 0] }, 0] },
+                ],
+              },
+            },
           },
         },
       ]),
@@ -1744,8 +1780,22 @@ router.get('/day-session/:sessionId/orders', async (req, res, next) => {
           totalDiscount: { $sum: '$discountAmount' },
           totalProfit: { $sum: '$profit' },
           totalDeliveryCharges: { $sum: { $ifNull: ['$deliveryCharges', 0] } },
-          cashSales: { $sum: { $cond: [{ $eq: ['$paymentMethod', 'CASH'] }, { $ifNull: ['$grandTotal', '$total'] }, 0] } },
-          cardSales: { $sum: { $cond: [{ $eq: ['$paymentMethod', 'CARD'] }, { $ifNull: ['$grandTotal', '$total'] }, 0] } },
+          cashSales: {
+            $sum: {
+              $add: [
+                { $cond: [{ $eq: ['$paymentMethod', 'CASH'] }, { $ifNull: ['$grandTotal', '$total'] }, 0] },
+                { $cond: [{ $eq: ['$paymentMethod', 'SPLIT'] }, { $ifNull: ['$splitCashAmount', 0] }, 0] },
+              ],
+            },
+          },
+          cardSales: {
+            $sum: {
+              $add: [
+                { $cond: [{ $eq: ['$paymentMethod', 'CARD'] }, { $ifNull: ['$grandTotal', '$total'] }, 0] },
+                { $cond: [{ $eq: ['$paymentMethod', 'SPLIT'] }, { $ifNull: ['$splitCardAmount', 0] }, 0] },
+              ],
+            },
+          },
         },
       },
     ]);

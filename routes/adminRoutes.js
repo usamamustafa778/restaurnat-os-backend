@@ -417,7 +417,14 @@ const mapCustomer = (customer) => ({
 });
 
 const mapOrder = (order) => {
-  const paymentLabels = { PENDING: 'To be paid', CASH: 'Cash', CARD: 'Card', ONLINE: 'Online', OTHER: 'Other' };
+  const paymentLabels = {
+    PENDING: 'To be paid',
+    CASH: 'Cash',
+    CARD: 'Card',
+    ONLINE: 'Online',
+    SPLIT: 'Split',
+    OTHER: 'Other',
+  };
   const rawCustomerName = order.customerName || '';
   const createdByObj = order.createdBy && typeof order.createdBy === 'object' ? order.createdBy : null;
   const orderTakerName = createdByObj && createdByObj.name ? createdByObj.name : '';
@@ -467,6 +474,10 @@ const mapOrder = (order) => {
     paymentAmountReceived: order.paymentAmountReceived ?? null,
     paymentAmountReturned: order.paymentAmountReturned ?? null,
     paymentProvider: order.paymentProvider ?? null,
+    splitCashAmount: order.splitCashAmount ?? null,
+    splitCardAmount: order.splitCardAmount ?? null,
+    splitOnlineAmount: order.splitOnlineAmount ?? null,
+    splitOnlineProvider: order.splitOnlineProvider ?? null,
     deliveryCharges: order.deliveryCharges ?? 0,
     deliveryPaymentCollected: order.deliveryPaymentCollected ?? false,
     // assignedRiderId/Name/Phone may be either stored fields or populated.
@@ -949,11 +960,19 @@ router.put('/orders/:id/payment', async (req, res, next) => {
       return res.status(403).json({ message: 'Order takers cannot record payment' });
     }
     const { id } = req.params;
-    const { paymentMethod, paymentProvider, amountReceived, amountReturned } = req.body;
+    const {
+      paymentMethod,
+      paymentProvider,
+      amountReceived,
+      amountReturned,
+      cashAmount,
+      cardAmount,
+      onlineAmount,
+    } = req.body;
     const restaurantId = getRestaurantIdForRequest(req);
 
-    if (!['CASH', 'CARD', 'ONLINE'].includes(paymentMethod)) {
-      return res.status(400).json({ message: 'Invalid paymentMethod; use CASH, CARD, or ONLINE' });
+    if (!['CASH', 'CARD', 'ONLINE', 'SPLIT'].includes(paymentMethod)) {
+      return res.status(400).json({ message: 'Invalid paymentMethod; use CASH, CARD, ONLINE, or SPLIT' });
     }
 
     if (paymentMethod === 'ONLINE') {
@@ -977,7 +996,7 @@ router.put('/orders/:id/payment', async (req, res, next) => {
       return res.status(400).json({ message: 'Cannot record payment for cancelled order' });
     }
 
-    const billTotal = order.total;
+    const billTotal = Number(order.grandTotal ?? order.total ?? 0) || 0;
     let received = amountReceived != null ? Number(amountReceived) : null;
     let returned = amountReturned != null ? Number(amountReturned) : null;
 
@@ -989,6 +1008,33 @@ router.put('/orders/:id/payment', async (req, res, next) => {
         return res.status(400).json({ message: `Amount received (${received}) is less than bill total (${billTotal})` });
       }
       returned = returned != null && !isNaN(returned) ? returned : (received - billTotal);
+    } else if (paymentMethod === 'SPLIT') {
+      const cashPart = Number(cashAmount);
+      const cardPart = Number(cardAmount);
+      const onlinePart = Number(onlineAmount);
+      if (
+        isNaN(cashPart) ||
+        cashPart < 0 ||
+        isNaN(cardPart) ||
+        cardPart < 0 ||
+        isNaN(onlinePart) ||
+        onlinePart < 0
+      ) {
+        return res.status(400).json({ message: 'For SPLIT payment, cashAmount/cardAmount/onlineAmount must be >= 0' });
+      }
+      const positiveParts = [cashPart, cardPart, onlinePart].filter((n) => n > 0).length;
+      if (positiveParts < 2) {
+        return res.status(400).json({ message: 'For SPLIT payment, at least 2 non-zero parts are required' });
+      }
+      const splitTotal = cashPart + cardPart + onlinePart;
+      if (Math.abs(splitTotal - billTotal) > 0.01) {
+        return res.status(400).json({ message: `Split payment must equal bill total (${billTotal})` });
+      }
+      if (onlinePart > 0 && (!paymentProvider || !String(paymentProvider).trim())) {
+        return res.status(400).json({ message: 'For SPLIT payment with online amount, paymentProvider is required' });
+      }
+      received = billTotal;
+      returned = 0;
     } else {
       received = null;
       returned = null;
@@ -996,9 +1042,24 @@ router.put('/orders/:id/payment', async (req, res, next) => {
 
     const wasAlreadyDelivered = order.status === 'DELIVERED';
     order.paymentMethod = paymentMethod;
-    order.paymentProvider = paymentMethod === 'ONLINE' ? paymentProvider : null;
+    order.paymentProvider =
+      paymentMethod === 'ONLINE' || (paymentMethod === 'SPLIT' && Number(onlineAmount) > 0)
+        ? String(paymentProvider || '').trim() || null
+        : null;
     order.paymentAmountReceived = received;
     order.paymentAmountReturned = returned;
+    if (paymentMethod === 'SPLIT') {
+      order.splitCashAmount = Number(cashAmount);
+      order.splitCardAmount = Number(cardAmount) || 0;
+      order.splitOnlineAmount = Number(onlineAmount);
+      order.splitOnlineProvider =
+        Number(onlineAmount) > 0 ? String(paymentProvider || '').trim() || null : null;
+    } else {
+      order.splitCashAmount = null;
+      order.splitCardAmount = null;
+      order.splitOnlineAmount = null;
+      order.splitOnlineProvider = null;
+    }
     if (!wasAlreadyDelivered) {
       order.status = 'DELIVERED';
       if (!order.statusHistory) order.statusHistory = [];
@@ -1101,10 +1162,16 @@ router.put('/orders/:id/collect-payment', async (req, res, next) => {
       return res.status(403).json({ message: 'Insufficient permissions to record payment collection' });
     }
     const restaurantId = getRestaurantIdForRequest(req);
-    const { paymentMethod = 'CASH', paymentProvider } = req.body;
+    const {
+      paymentMethod = 'CASH',
+      paymentProvider,
+      cashAmount,
+      cardAmount,
+      onlineAmount,
+    } = req.body;
 
-    if (!['CASH', 'CARD', 'ONLINE'].includes(paymentMethod)) {
-      return res.status(400).json({ message: 'Invalid paymentMethod; use CASH, CARD, or ONLINE' });
+    if (!['CASH', 'CARD', 'ONLINE', 'SPLIT'].includes(paymentMethod)) {
+      return res.status(400).json({ message: 'Invalid paymentMethod; use CASH, CARD, ONLINE, or SPLIT' });
     }
     if (paymentMethod === 'ONLINE') {
       if (!paymentProvider || !String(paymentProvider).trim()) {
@@ -1131,8 +1198,45 @@ router.put('/orders/:id/collect-payment', async (req, res, next) => {
 
     order.deliveryPaymentCollected = true;
     order.paymentMethod = paymentMethod;
-    order.paymentProvider = paymentMethod === 'ONLINE' ? paymentProvider : null;
-    order.paymentAmountReceived = order.total;
+    if (paymentMethod === 'SPLIT') {
+      const cashPart = Number(cashAmount);
+      const cardPart = Number(cardAmount);
+      const onlinePart = Number(onlineAmount);
+      if (
+        isNaN(cashPart) ||
+        cashPart < 0 ||
+        isNaN(cardPart) ||
+        cardPart < 0 ||
+        isNaN(onlinePart) ||
+        onlinePart < 0
+      ) {
+        return res.status(400).json({ message: 'For SPLIT payment, cashAmount/cardAmount/onlineAmount must be >= 0' });
+      }
+      const positiveParts = [cashPart, cardPart, onlinePart].filter((n) => n > 0).length;
+      if (positiveParts < 2) {
+        return res.status(400).json({ message: 'For SPLIT payment, at least 2 non-zero parts are required' });
+      }
+      const billTotal = Number(order.grandTotal ?? order.total ?? 0) || 0;
+      const splitTotal = cashPart + cardPart + onlinePart;
+      if (Math.abs(splitTotal - billTotal) > 0.01) {
+        return res.status(400).json({ message: `Split payment must equal bill total (${billTotal})` });
+      }
+      if (onlinePart > 0 && (!paymentProvider || !String(paymentProvider).trim())) {
+        return res.status(400).json({ message: 'For SPLIT payment with online amount, paymentProvider is required' });
+      }
+      order.paymentProvider = onlinePart > 0 ? paymentProvider : null;
+      order.splitCashAmount = cashPart;
+      order.splitCardAmount = cardPart;
+      order.splitOnlineAmount = onlinePart;
+      order.splitOnlineProvider = onlinePart > 0 ? paymentProvider : null;
+    } else {
+      order.paymentProvider = paymentMethod === 'ONLINE' ? paymentProvider : null;
+      order.splitCashAmount = null;
+      order.splitCardAmount = null;
+      order.splitOnlineAmount = null;
+      order.splitOnlineProvider = null;
+    }
+    order.paymentAmountReceived = Number(order.grandTotal ?? order.total ?? 0) || 0;
     order.paymentAmountReturned = 0;
     await order.save();
 
@@ -2573,9 +2677,14 @@ function getCurrentBusinessDayStart(cutoffHour) {
 function isOrderPaid(order) {
   if (!order) return false;
   if (order.source === 'FOODPANDA') return true;
-  if (order.paymentAmountReceived != null && Number(order.paymentAmountReceived) > 0) return true;
+  if (order.paymentAmountReceived != null) {
+    const gross = Number(order.paymentAmountReceived) || 0;
+    const returned = Number(order.paymentAmountReturned) || 0;
+    const totalDue = Number(order.grandTotal ?? order.total ?? 0) || 0;
+    if (gross - returned >= totalDue) return true;
+  }
   const pm = String(order.paymentMethod || '').toUpperCase();
-  if (pm === 'CASH' || pm === 'CARD' || pm === 'ONLINE' || pm === 'FOODPANDA') return true;
+  if (pm === 'CASH' || pm === 'CARD' || pm === 'ONLINE' || pm === 'SPLIT' || pm === 'FOODPANDA') return true;
   if (String(order.orderType || '').toUpperCase() === 'DELIVERY' && order.deliveryPaymentCollected === true) return true;
   return false;
 }
@@ -2690,12 +2799,32 @@ router.get('/reports/sales', async (req, res, next) => {
       const dateKey = new Date(order.createdAt).toISOString().slice(0, 10);
       dailyMap.set(dateKey, (dailyMap.get(dateKey) || 0) + orderRevenue);
       const pm = order.paymentMethod || 'CASH';
-      paymentDistribution[pm] = (paymentDistribution[pm] || 0) + orderRevenue;
-
-      // Aggregate payment method rows (counts + amount)
-      if (!paymentMethodMap[pm]) paymentMethodMap[pm] = { orders: 0, amount: 0 };
-      paymentMethodMap[pm].orders += 1;
-      paymentMethodMap[pm].amount += orderRevenue;
+      if (pm === 'SPLIT') {
+        const splitCash = Number(order.splitCashAmount) || 0;
+        const splitCard = Number(order.splitCardAmount) || 0;
+        const splitOnline = Number(order.splitOnlineAmount) || 0;
+        const buckets = [
+          ['CASH', splitCash],
+          ['CARD', splitCard],
+          ['ONLINE', splitOnline],
+        ];
+        for (const [methodKey, amount] of buckets) {
+          if (amount <= 0) continue;
+          paymentDistribution[methodKey] =
+            (paymentDistribution[methodKey] || 0) + amount;
+          if (!paymentMethodMap[methodKey]) {
+            paymentMethodMap[methodKey] = { orders: 0, amount: 0 };
+          }
+          paymentMethodMap[methodKey].orders += 1;
+          paymentMethodMap[methodKey].amount += amount;
+        }
+      } else {
+        paymentDistribution[pm] = (paymentDistribution[pm] || 0) + orderRevenue;
+        // Aggregate payment method rows (counts + amount)
+        if (!paymentMethodMap[pm]) paymentMethodMap[pm] = { orders: 0, amount: 0 };
+        paymentMethodMap[pm].orders += 1;
+        paymentMethodMap[pm].amount += orderRevenue;
+      }
 
       // Aggregate order type rows
       const ot = order.orderType || 'DINE_IN';
@@ -2704,11 +2833,20 @@ router.get('/reports/sales', async (req, res, next) => {
       orderTypeMap[ot].amount += orderRevenue;
 
       // Aggregate online payment accounts by paymentProvider
-      if (order.paymentMethod === 'ONLINE' && order.paymentProvider && String(order.paymentProvider).trim()) {
+      if (
+        (order.paymentMethod === 'ONLINE' ||
+          (order.paymentMethod === 'SPLIT' &&
+            Number(order.splitOnlineAmount) > 0)) &&
+        order.paymentProvider &&
+        String(order.paymentProvider).trim()
+      ) {
         const key = String(order.paymentProvider).trim();
         if (!paymentAccountMap[key]) paymentAccountMap[key] = { orders: 0, amount: 0 };
         paymentAccountMap[key].orders += 1;
-        paymentAccountMap[key].amount += orderRevenue;
+        paymentAccountMap[key].amount +=
+          order.paymentMethod === 'SPLIT'
+            ? Number(order.splitOnlineAmount) || 0
+            : orderRevenue;
       }
 
       if (hourlySales) hourlySales[new Date(order.createdAt).getHours()] += orderRevenue;
@@ -2788,13 +2926,27 @@ router.get('/reports/sales', async (req, res, next) => {
     };
 
     // Payment-wise breakdown (shape compatible with day-report paymentRows)
-    const pmLabels = { CASH: 'Cash', CARD: 'Card', ONLINE: 'Online', OTHER: 'Other', PENDING: 'To be paid' };
+    const pmLabels = {
+      CASH: 'Cash',
+      CARD: 'Card',
+      ONLINE: 'Online',
+      SPLIT: 'Split',
+      OTHER: 'Other',
+      PENDING: 'To be paid',
+    };
     const paidOrdersCount = orders.length;
+    const paymentRowOrderUnits = Object.values(paymentMethodMap).reduce(
+      (sum, d) => sum + (Number(d.orders) || 0),
+      0
+    );
     const paymentRows = Object.entries(paymentMethodMap).map(([m, d]) => ({
       method: pmLabels[m] || m,
       orders: d.orders,
       amount: Math.round(d.amount),
-      percent: paidOrdersCount > 0 ? ((d.orders / paidOrdersCount) * 100).toFixed(1) + '%' : '0%',
+      percent:
+        paymentRowOrderUnits > 0
+          ? ((d.orders / paymentRowOrderUnits) * 100).toFixed(1) + '%'
+          : '0%',
     }));
     if (paymentRows.length > 0) {
       paymentRows.push({
@@ -2977,16 +3129,37 @@ router.get('/reports/day', async (req, res, next) => {
     const pm = {};
     for (const o of completed) {
       const m = o.paymentMethod || 'CASH';
-      if (!pm[m]) pm[m] = { orders: 0, amount: 0 };
-      pm[m].orders++;
-      pm[m].amount += o.grandTotal ?? o.total;
+      if (m === 'SPLIT') {
+        const buckets = [
+          ['CASH', Number(o.splitCashAmount) || 0],
+          ['CARD', Number(o.splitCardAmount) || 0],
+          ['ONLINE', Number(o.splitOnlineAmount) || 0],
+        ];
+        for (const [methodKey, amount] of buckets) {
+          if (amount <= 0) continue;
+          if (!pm[methodKey]) pm[methodKey] = { orders: 0, amount: 0 };
+          pm[methodKey].orders++;
+          pm[methodKey].amount += amount;
+        }
+      } else {
+        if (!pm[m]) pm[m] = { orders: 0, amount: 0 };
+        pm[m].orders++;
+        pm[m].amount += o.grandTotal ?? o.total;
+      }
     }
     const pmLabels = { CASH: 'Cash', CARD: 'Card', ONLINE: 'Online', OTHER: 'Foodpanda' };
+    const paymentRowOrderUnits = Object.values(pm).reduce(
+      (sum, d) => sum + (Number(d.orders) || 0),
+      0
+    );
     const paymentRows = Object.entries(pm).map(([m, d]) => ({
       method: pmLabels[m] || m,
       orders: d.orders,
       amount: Math.round(d.amount),
-      percent: completed.length > 0 ? ((d.orders / completed.length) * 100).toFixed(1) + '%' : '0%',
+      percent:
+        paymentRowOrderUnits > 0
+          ? ((d.orders / paymentRowOrderUnits) * 100).toFixed(1) + '%'
+          : '0%',
     }));
     paymentRows.push({ method: 'Total', orders: completed.length, amount: Math.round(totalRev), percent: '100%' });
 

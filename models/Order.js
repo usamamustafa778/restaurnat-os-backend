@@ -101,7 +101,7 @@ const orderSchema = new mongoose.Schema(
     },
     paymentMethod: {
       type: String,
-      enum: ['PENDING', 'CASH', 'CARD', 'ONLINE', 'OTHER'],
+      enum: ['PENDING', 'CASH', 'CARD', 'ONLINE', 'SPLIT', 'OTHER'],
       default: 'PENDING',
     },
     paymentProvider: {
@@ -110,6 +110,10 @@ const orderSchema = new mongoose.Schema(
     },
     paymentAmountReceived: { type: Number, default: null },
     paymentAmountReturned: { type: Number, default: null },
+    splitCashAmount: { type: Number, default: null, min: 0 },
+    splitCardAmount: { type: Number, default: null, min: 0 },
+    splitOnlineAmount: { type: Number, default: null, min: 0 },
+    splitOnlineProvider: { type: String, default: null },
     assignedRiderId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
