@@ -20,6 +20,7 @@ const { protect, requireRole, requireRestaurant, checkSubscriptionStatus, resolv
 const { getOrderRooms } = require('../utils/socketRooms');
 
 const router = express.Router();
+const VERCEL_API_BASE = 'https://api.vercel.com';
 
 // Allow restaurant owner and staff roles to access tenant admin APIs (delivery_rider for menu/order creation)
 router.use(
@@ -115,6 +116,125 @@ const slugify = (value) =>
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
     .substring(0, 50);
+
+function normalizeCustomDomain(value) {
+  if (value == null) return null;
+  const v = String(value)
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//i, '')
+    .replace(/\/+$/g, '');
+  return v || null;
+}
+
+function getVercelProjectConfig() {
+  const token = process.env.VERCEL_API_TOKEN;
+  const projectId = process.env.VERCEL_PROJECT_ID;
+  const teamId = process.env.VERCEL_TEAM_ID;
+  return { token, projectId, teamId };
+}
+
+async function vercelProjectRequest(path, { method = 'GET', body } = {}) {
+  const { token, projectId, teamId } = getVercelProjectConfig();
+  if (!token || !projectId) {
+    return {
+      ok: false,
+      status: 500,
+      data: null,
+      message:
+        'Vercel integration is not configured. Set VERCEL_API_TOKEN and VERCEL_PROJECT_ID.',
+    };
+  }
+
+  const qs = new URLSearchParams();
+  if (teamId) qs.set('teamId', teamId);
+  const url = `${VERCEL_API_BASE}${path}${qs.toString() ? `?${qs.toString()}` : ''}`;
+
+  const res = await fetch(url, {
+    method,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+
+  let data = null;
+  try {
+    data = await res.json();
+  } catch (_) {
+    data = null;
+  }
+
+  if (!res.ok) {
+    const message = data?.error?.message || data?.message || `Vercel API request failed (${res.status})`;
+    return { ok: false, status: res.status, data, message };
+  }
+
+  return { ok: true, status: res.status, data, message: null };
+}
+
+async function connectDomainOnVercel(domain) {
+  const { projectId } = getVercelProjectConfig();
+
+  const addResult = await vercelProjectRequest(`/v10/projects/${projectId}/domains`, {
+    method: 'POST',
+    body: { name: domain },
+  });
+
+  const alreadyExists =
+    !addResult.ok &&
+    (addResult.status === 409 ||
+      /already/i.test(addResult.message || '') ||
+      /in use/i.test(addResult.message || ''));
+
+  if (!addResult.ok && !alreadyExists) {
+    return {
+      ok: false,
+      message: addResult.message,
+      status: null,
+    };
+  }
+
+  await vercelProjectRequest(`/v9/projects/${projectId}/domains/${encodeURIComponent(domain)}/verify`, {
+    method: 'POST',
+  });
+
+  const statusResult = await vercelProjectRequest(
+    `/v9/projects/${projectId}/domains/${encodeURIComponent(domain)}`
+  );
+  if (!statusResult.ok) {
+    return {
+      ok: true,
+      message: alreadyExists
+        ? 'Domain exists on Vercel project but status could not be fetched.'
+        : 'Domain connected on Vercel project.',
+      status: null,
+    };
+  }
+
+  return {
+    ok: true,
+    message: alreadyExists
+      ? 'Domain already exists on Vercel project.'
+      : 'Domain connected on Vercel project.',
+    status: {
+      name: statusResult.data?.name || domain,
+      verified: statusResult.data?.verified === true,
+      verification: statusResult.data?.verification || [],
+      apexName: statusResult.data?.apexName || null,
+      redirect: statusResult.data?.redirect || null,
+    },
+  };
+}
+
+async function removeDomainFromVercel(domain) {
+  const { projectId, token } = getVercelProjectConfig();
+  if (!token || !projectId || !domain) return;
+  await vercelProjectRequest(`/v9/projects/${projectId}/domains/${encodeURIComponent(domain)}`, {
+    method: 'DELETE',
+  });
+}
 
 const generateUniqueBranchCode = async (restaurantId, baseName) => {
   let base = slugify(baseName);
@@ -2539,6 +2659,9 @@ router.put('/website', async (req, res, next) => {
       restaurant.website = {};
     }
 
+    const previousCustomDomain = normalizeCustomDomain(restaurant.website.customDomain);
+    let customDomainConnection = null;
+
     // Basic fields (always global across branches)
     if (name !== undefined) restaurant.website.name = name;
     if (logoUrl !== undefined) restaurant.website.logoUrl = logoUrl;
@@ -2550,7 +2673,41 @@ router.put('/website', async (req, res, next) => {
     if (address !== undefined) restaurant.website.address = address;
     if (typeof isPublic === 'boolean') restaurant.website.isPublic = isPublic;
     if (template !== undefined) restaurant.website.template = template;
-    if (customDomain !== undefined) restaurant.website.customDomain = customDomain;
+    if (customDomain !== undefined) {
+      const normalizedDomain = normalizeCustomDomain(customDomain);
+
+      if (normalizedDomain) {
+        const integration = await connectDomainOnVercel(normalizedDomain);
+        if (!integration.ok) {
+          return res.status(502).json({
+            message: integration.message || 'Failed to connect domain with Vercel',
+          });
+        }
+
+        restaurant.website.customDomain = normalizedDomain;
+        customDomainConnection = {
+          connected: true,
+          domain: normalizedDomain,
+          message: integration.message,
+          status: integration.status,
+        };
+
+        if (previousCustomDomain && previousCustomDomain !== normalizedDomain) {
+          await removeDomainFromVercel(previousCustomDomain);
+        }
+      } else {
+        restaurant.website.customDomain = '';
+        customDomainConnection = {
+          connected: false,
+          domain: null,
+          message: 'Custom domain disconnected.',
+          status: null,
+        };
+        if (previousCustomDomain) {
+          await removeDomainFromVercel(previousCustomDomain);
+        }
+      }
+    }
 
     // Branch-aware dynamic fields
     const dynamicKeys = [
@@ -2616,6 +2773,10 @@ router.put('/website', async (req, res, next) => {
           merged[key] = overrides[key];
         }
       });
+    }
+
+    if (customDomainConnection) {
+      merged.customDomainConnection = customDomainConnection;
     }
 
     res.json(merged);
