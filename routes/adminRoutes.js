@@ -259,28 +259,12 @@ async function connectDomainOnVercel(domain) {
     method: 'POST',
   });
 
-  const statusResult = await vercelProjectRequest(
-    `/v9/projects/${projectId}/domains/${encodeURIComponent(domain)}`
-  );
-  if (!statusResult.ok) {
-    return {
-      ok: true,
-      message: 'Domain connected on Vercel project, but status could not be fetched.',
-      status: null,
-    };
-  }
-
+  // Reuse shared helper so DNS records (including A) are consistently populated.
+  const status = await getDomainStatusFromVercel(domain);
   return {
     ok: true,
     message: 'Domain connected on Vercel project.',
-    status: {
-      name: statusResult.data?.name || domain,
-      verified: statusResult.data?.verified === true,
-      verification: statusResult.data?.verification || [],
-      dnsRecords: collectVercelDnsRecords(statusResult.data || {}),
-      apexName: statusResult.data?.apexName || null,
-      redirect: statusResult.data?.redirect || null,
-    },
+    status,
   };
 }
 
@@ -333,17 +317,23 @@ async function removeDomainFromVercel(domain) {
 async function getDomainStatusFromVercel(domain) {
   const { projectId, token } = getVercelProjectConfig();
   if (!token || !projectId || !domain) return null;
-  const statusResult = await vercelProjectRequest(
-    `/v9/projects/${projectId}/domains/${encodeURIComponent(domain)}`
-  );
-  if (!statusResult.ok) return null;
+  const [statusResult, configResult] = await Promise.all([
+    vercelProjectRequest(`/v9/projects/${projectId}/domains/${encodeURIComponent(domain)}`),
+    vercelProjectRequest(`/v6/domains/${encodeURIComponent(domain)}/config`),
+  ]);
+  if (!statusResult.ok && !configResult.ok) return null;
+
+  const statusData = statusResult.ok ? statusResult.data || {} : {};
+  const configData = configResult.ok ? configResult.data || {} : {};
+  const merged = { ...statusData, config: configData };
+
   return {
-    name: statusResult.data?.name || domain,
-    verified: statusResult.data?.verified === true,
-    verification: statusResult.data?.verification || [],
-    dnsRecords: collectVercelDnsRecords(statusResult.data || {}),
-    apexName: statusResult.data?.apexName || null,
-    redirect: statusResult.data?.redirect || null,
+    name: statusData?.name || domain,
+    verified: statusData?.verified === true,
+    verification: statusData?.verification || [],
+    dnsRecords: collectVercelDnsRecords(merged),
+    apexName: statusData?.apexName || null,
+    redirect: statusData?.redirect || null,
   };
 }
 
