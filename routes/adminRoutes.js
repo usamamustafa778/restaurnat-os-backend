@@ -174,6 +174,43 @@ async function vercelProjectRequest(path, { method = 'GET', body } = {}) {
   return { ok: true, status: res.status, data, message: null };
 }
 
+function collectVercelDnsRecords(domainData = {}) {
+  const sources = [
+    domainData?.verification,
+    domainData?.dnsRecords,
+    domainData?.records,
+    domainData?.config,
+    domainData?.recommendedRecords,
+  ];
+  const list = [];
+  for (const src of sources) {
+    if (!Array.isArray(src)) continue;
+    src.forEach((r) => {
+      if (!r || typeof r !== 'object') return;
+      const type = String(r.type || r.recordType || '').toUpperCase();
+      const name = r.name || r.domain || r.host || r.record || '';
+      const value = r.value || r.target || r.data || r.pointsTo || '';
+      if (!type && !name && !value) return;
+      list.push({
+        type: type || 'TXT',
+        domain: String(name || ''),
+        value: String(value || ''),
+        reason: r.reason || null,
+      });
+    });
+  }
+
+  const unique = [];
+  const seen = new Set();
+  list.forEach((r) => {
+    const key = `${r.type}|${r.domain}|${r.value}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    unique.push(r);
+  });
+  return unique;
+}
+
 async function connectDomainOnVercel(domain) {
   const { projectId } = getVercelProjectConfig();
 
@@ -205,6 +242,9 @@ async function connectDomainOnVercel(domain) {
         name: domain,
         verified: false,
         verification: Array.isArray(verification) ? verification : [],
+        dnsRecords: collectVercelDnsRecords({
+          verification: Array.isArray(verification) ? verification : [],
+        }),
         apexName: null,
         redirect: null,
       },
@@ -238,6 +278,7 @@ async function connectDomainOnVercel(domain) {
       name: statusResult.data?.name || domain,
       verified: statusResult.data?.verified === true,
       verification: statusResult.data?.verification || [],
+      dnsRecords: collectVercelDnsRecords(statusResult.data || {}),
       apexName: statusResult.data?.apexName || null,
       redirect: statusResult.data?.redirect || null,
     },
@@ -263,6 +304,7 @@ async function getDomainStatusFromVercel(domain) {
     name: statusResult.data?.name || domain,
     verified: statusResult.data?.verified === true,
     verification: statusResult.data?.verification || [],
+    dnsRecords: collectVercelDnsRecords(statusResult.data || {}),
     apexName: statusResult.data?.apexName || null,
     redirect: statusResult.data?.redirect || null,
   };
