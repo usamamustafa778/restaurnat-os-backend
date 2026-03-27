@@ -175,30 +175,51 @@ async function vercelProjectRequest(path, { method = 'GET', body } = {}) {
 }
 
 function collectVercelDnsRecords(domainData = {}) {
-  const sources = [
+  const list = [];
+
+  const pushRecord = (r) => {
+    if (!r || typeof r !== 'object') return;
+    const type = String(r.type || r.recordType || '').toUpperCase();
+    const name = r.name || r.domain || r.host || r.record || '';
+    const value = r.value || r.target || r.data || r.pointsTo || r.ip || '';
+    if (!type && !name && !value) return;
+    list.push({
+      type: type || 'TXT',
+      domain: String(name || ''),
+      value: String(value || ''),
+      reason: r.reason || null,
+    });
+  };
+
+  // Known top-level arrays first.
+  [
     domainData?.verification,
     domainData?.dnsRecords,
     domainData?.records,
-    domainData?.config,
     domainData?.recommendedRecords,
-  ];
-  const list = [];
-  for (const src of sources) {
-    if (!Array.isArray(src)) continue;
-    src.forEach((r) => {
-      if (!r || typeof r !== 'object') return;
-      const type = String(r.type || r.recordType || '').toUpperCase();
-      const name = r.name || r.domain || r.host || r.record || '';
-      const value = r.value || r.target || r.data || r.pointsTo || '';
-      if (!type && !name && !value) return;
-      list.push({
-        type: type || 'TXT',
-        domain: String(name || ''),
-        value: String(value || ''),
-        reason: r.reason || null,
-      });
-    });
-  }
+    domainData?.conflicts,
+  ].forEach((arr) => {
+    if (!Array.isArray(arr)) return;
+    arr.forEach(pushRecord);
+  });
+
+  // Deep scan config payload because Vercel shape differs by endpoint/version.
+  const visited = new Set();
+  const scan = (node, depth = 0) => {
+    if (!node || depth > 5) return;
+    if (typeof node !== 'object') return;
+    if (visited.has(node)) return;
+    visited.add(node);
+
+    if (Array.isArray(node)) {
+      node.forEach((child) => scan(child, depth + 1));
+      return;
+    }
+
+    pushRecord(node);
+    Object.keys(node).forEach((k) => scan(node[k], depth + 1));
+  };
+  scan(domainData?.config || {});
 
   const unique = [];
   const seen = new Set();
@@ -326,12 +347,19 @@ async function getDomainStatusFromVercel(domain) {
   const statusData = statusResult.ok ? statusResult.data || {} : {};
   const configData = configResult.ok ? configResult.data || {} : {};
   const merged = { ...statusData, config: configData };
+  const dnsRecords = collectVercelDnsRecords(merged);
+  const invalidConfig =
+    configData?.misconfigured === true ||
+    configData?.configuredBy === 'ERROR' ||
+    configData?.serviceType === 'external' ||
+    (statusData?.verified !== true && dnsRecords.length > 0);
 
   return {
     name: statusData?.name || domain,
     verified: statusData?.verified === true,
     verification: statusData?.verification || [],
-    dnsRecords: collectVercelDnsRecords(merged),
+    dnsRecords,
+    invalidConfig,
     apexName: statusData?.apexName || null,
     redirect: statusData?.redirect || null,
   };
