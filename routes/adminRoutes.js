@@ -287,10 +287,48 @@ async function connectDomainOnVercel(domain) {
 
 async function removeDomainFromVercel(domain) {
   const { projectId, token } = getVercelProjectConfig();
-  if (!token || !projectId || !domain) return;
-  await vercelProjectRequest(`/v9/projects/${projectId}/domains/${encodeURIComponent(domain)}`, {
-    method: 'DELETE',
-  });
+  if (!token || !projectId || !domain) {
+    return {
+      ok: false,
+      status: 500,
+      message: 'Vercel integration is not configured for domain removal.',
+    };
+  }
+
+  // Prefer v10 endpoint first, then fall back to v9 for compatibility.
+  const v10Result = await vercelProjectRequest(
+    `/v10/projects/${projectId}/domains/${encodeURIComponent(domain)}`,
+    {
+      method: 'DELETE',
+    }
+  );
+  if (v10Result.ok || v10Result.status === 404) {
+    return {
+      ok: true,
+      status: v10Result.status,
+      message: v10Result.status === 404 ? 'Domain already absent on Vercel.' : 'Domain removed from Vercel.',
+    };
+  }
+
+  const v9Result = await vercelProjectRequest(
+    `/v9/projects/${projectId}/domains/${encodeURIComponent(domain)}`,
+    {
+      method: 'DELETE',
+    }
+  );
+  if (v9Result.ok || v9Result.status === 404) {
+    return {
+      ok: true,
+      status: v9Result.status,
+      message: v9Result.status === 404 ? 'Domain already absent on Vercel.' : 'Domain removed from Vercel.',
+    };
+  }
+
+  return {
+    ok: false,
+    status: v9Result.status || v10Result.status,
+    message: v9Result.message || v10Result.message || 'Failed to remove domain from Vercel.',
+  };
 }
 
 async function getDomainStatusFromVercel(domain) {
@@ -2807,9 +2845,26 @@ router.put('/website', async (req, res, next) => {
         };
 
         if (previousCustomDomain && previousCustomDomain !== normalizedDomain) {
-          await removeDomainFromVercel(previousCustomDomain);
+          const removeResult = await removeDomainFromVercel(previousCustomDomain);
+          if (!removeResult.ok) {
+            return res.status(502).json({
+              message:
+                removeResult.message ||
+                'New domain added, but failed to remove previous domain from Vercel.',
+            });
+          }
         }
       } else {
+        if (previousCustomDomain) {
+          const removeResult = await removeDomainFromVercel(previousCustomDomain);
+          if (!removeResult.ok) {
+            return res.status(502).json({
+              message:
+                removeResult.message ||
+                'Failed to remove domain from Vercel. Local domain was not disconnected.',
+            });
+          }
+        }
         restaurant.website.customDomain = '';
         customDomainConnection = {
           connected: false,
@@ -2817,9 +2872,6 @@ router.put('/website', async (req, res, next) => {
           message: 'Custom domain disconnected.',
           status: null,
         };
-        if (previousCustomDomain) {
-          await removeDomainFromVercel(previousCustomDomain);
-        }
       }
     }
 
