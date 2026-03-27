@@ -347,7 +347,19 @@ async function getDomainStatusFromVercel(domain) {
   const statusData = statusResult.ok ? statusResult.data || {} : {};
   const configData = configResult.ok ? configResult.data || {} : {};
   const merged = { ...statusData, config: configData };
-  const dnsRecords = collectVercelDnsRecords(merged);
+  // Prefer records Vercel shows in the "DNS Records" tab (these are what the user must configure).
+  let dnsRecords = [];
+  if (Array.isArray(configData.records) && configData.records.length > 0) {
+    dnsRecords = configData.records.map((r) => ({
+      type: String(r.type || r.recordType || '').toUpperCase() || 'TXT',
+      domain: String(r.name || r.domain || r.host || ''),
+      value: String(r.value || r.target || r.data || r.pointsTo || r.ip || ''),
+      reason: r.reason || null,
+    }));
+  } else {
+    dnsRecords = collectVercelDnsRecords(merged);
+  }
+
   const invalidConfig =
     configData?.misconfigured === true ||
     configData?.configuredBy === 'ERROR' ||
