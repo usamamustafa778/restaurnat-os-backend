@@ -41,6 +41,10 @@ const storefrontCustomerSchema = new mongoose.Schema(
     signupOtpExpires: { type: Date, default: null },
     loginOtp: { type: String, default: null },
     loginOtpExpires: { type: Date, default: null },
+    /** Last checkout contact phone (editable per order; used to prefill checkout). */
+    savedPhone: { type: String, trim: true, default: '' },
+    /** Last delivery address from checkout (editable per order). */
+    savedDeliveryAddress: { type: String, trim: true, default: '' },
   },
   { timestamps: true }
 );

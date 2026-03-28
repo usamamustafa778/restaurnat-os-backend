@@ -5,6 +5,7 @@ const { sendOtpEmail } = require('../utils/email');
 const { normalizeEmail, normalizePhone } = require('../utils/storefrontIdentifiers');
 const generateStorefrontCustomerToken = require('../utils/generateStorefrontCustomerToken');
 const { authenticateStorefrontCustomer } = require('../middleware/storefrontCustomerAuth');
+const { storefrontCustomerToPublic } = require('../utils/storefrontCustomerPublic');
 
 const router = express.Router({ mergeParams: true });
 
@@ -303,14 +304,7 @@ router.post('/verify-signup-otp', rateAuth({ max: 15 }), async (req, res, next) 
     res.status(201).json({
       message: 'Account created',
       token,
-      customer: {
-        id: doc._id.toString(),
-        firstName: doc.firstName,
-        lastName: doc.lastName,
-        email: doc.email || '',
-        phone: doc.phone || '',
-        hasPassword: !!doc.password,
-      },
+      customer: storefrontCustomerToPublic(doc),
     });
   } catch (err) {
     next(err);
@@ -363,14 +357,7 @@ router.post('/login', rateAuth({ max: 15 }), async (req, res, next) => {
 
     res.json({
       token,
-      customer: {
-        id: doc._id.toString(),
-        firstName: doc.firstName,
-        lastName: doc.lastName,
-        email: doc.email || '',
-        phone: doc.phone || '',
-        hasPassword: true,
-      },
+      customer: storefrontCustomerToPublic(doc),
     });
   } catch (err) {
     next(err);
@@ -504,14 +491,7 @@ router.post('/verify-login-otp', rateAuth({ max: 15 }), async (req, res, next) =
 
     res.json({
       token,
-      customer: {
-        id: doc._id.toString(),
-        firstName: doc.firstName,
-        lastName: doc.lastName,
-        email: doc.email || '',
-        phone: doc.phone || '',
-        hasPassword: !!doc.password,
-      },
+      customer: storefrontCustomerToPublic(doc),
     });
   } catch (err) {
     next(err);
@@ -539,14 +519,7 @@ router.get('/me', rateAuth({ max: 60 }), authenticateStorefrontCustomer, async (
   try {
     const doc = req.storefrontCustomer;
     res.json({
-      customer: {
-        id: doc._id.toString(),
-        firstName: doc.firstName,
-        lastName: doc.lastName,
-        email: doc.email || '',
-        phone: doc.phone || '',
-        hasPassword: !!doc.password,
-      },
+      customer: storefrontCustomerToPublic(doc),
     });
   } catch (err) {
     next(err);

@@ -714,7 +714,7 @@ function mapStorefrontCustomerRow(doc) {
     name: name || '—',
     phone: doc.phone || '',
     email: doc.email || '',
-    address: '',
+    address: doc.savedDeliveryAddress || '',
     notes: '',
     branchId: null,
     totalOrders: 0,

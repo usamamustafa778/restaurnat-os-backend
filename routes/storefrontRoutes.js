@@ -7,6 +7,7 @@ const Category = require('../models/Category');
 const InventoryItem = require('../models/InventoryItem');
 const Customer = require('../models/Customer');
 const Order = require('../models/Order');
+const StorefrontCustomer = require('../models/StorefrontCustomer');
 const Deal = require('../models/Deal');
 const AgentConversation = require('../models/AgentConversation');
 const { generateOrderNumber } = require('../utils/orderNumber');
@@ -18,6 +19,7 @@ const {
   authenticateStorefrontCustomer,
   optionalStorefrontCustomer,
 } = require('../middleware/storefrontCustomerAuth');
+const { storefrontCustomerToPublic } = require('../utils/storefrontCustomerPublic');
 
 const router = express.Router();
 
@@ -818,6 +820,8 @@ router.post(
         );
       } catch (_) { /* non-critical */ }
 
+      const addressTrim = (deliveryAddress || '').trim();
+
       const order = await Order.create({
         restaurant: restaurant._id,
         branch: branch ? branch._id : undefined,
@@ -830,13 +834,23 @@ router.post(
         customerPhoneDigits,
         customerEmail: emailNorm || '',
         storefrontCustomer: storefrontCustomerId,
-        deliveryAddress: (deliveryAddress || '').trim(),
+        deliveryAddress: addressTrim,
         items: orderItems,
         subtotal,
         discountAmount: 0,
         total: subtotal,
         orderNumber,
       });
+
+      let customerPayload = null;
+      if (storefrontCustomerId) {
+        await StorefrontCustomer.updateOne(
+          { _id: storefrontCustomerId },
+          { $set: { savedPhone: phoneTrim, savedDeliveryAddress: addressTrim } }
+        );
+        const refreshed = await StorefrontCustomer.findById(storefrontCustomerId).lean();
+        if (refreshed) customerPayload = storefrontCustomerToPublic(refreshed);
+      }
 
       const io = req.app.get('io');
       if (io) {
@@ -854,6 +868,7 @@ router.post(
         message: 'Order placed successfully!',
         orderNumber: order.orderNumber,
         total: order.total,
+        ...(customerPayload ? { customer: customerPayload } : {}),
       });
     } catch (error) {
       next(error);
