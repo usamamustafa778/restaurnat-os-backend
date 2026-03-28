@@ -239,12 +239,13 @@ router.get(
       setCacheHeaders(res, 60, 300);
 
       const ai = w.aiAgents || {};
+      const logoFallback = restaurant.settings?.restaurantLogoUrl || null;
       res.json({
         slug: w.subdomain,
         name: w.name,
         template: w.template || 'classic',
         isPublic: w.isPublic,
-        logoUrl: w.logoUrl || null,
+        logoUrl: w.logoUrl || logoFallback || null,
         bannerUrl: w.bannerUrl || null,
         description: w.description || '',
         tagline: w.tagline || '',
@@ -453,12 +454,13 @@ router.get(
 
       setCacheHeaders(res, 30, 120);
 
+      const logoFallback = restaurant.settings?.restaurantLogoUrl || null;
       res.json({
         restaurant: {
           name: websiteConfig.name,
           description: websiteConfig.description,
           tagline: websiteConfig.tagline,
-          logoUrl: websiteConfig.logoUrl,
+          logoUrl: websiteConfig.logoUrl || logoFallback || null,
           bannerUrl: websiteConfig.bannerUrl,
           contactPhone: websiteConfig.contactPhone,
           contactEmail: websiteConfig.contactEmail,
