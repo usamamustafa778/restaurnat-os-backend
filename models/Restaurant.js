@@ -47,6 +47,10 @@ const websiteSettingsSchema = new mongoose.Schema(
     logoUrl: {
       type: String,
     },
+    /** Tab icon for the public website (PNG, ICO, or SVG URL). */
+    faviconUrl: {
+      type: String,
+    },
     bannerUrl: {
       type: String,
     },
@@ -64,6 +68,12 @@ const websiteSettingsSchema = new mongoose.Schema(
     },
     address: {
       type: String,
+    },
+    // homepage hero: single banner image or multi-slide carousel
+    heroType: {
+      type: String,
+      enum: ['banner', 'slides'],
+      default: 'slides',
     },
     // Hero Slides for homepage carousel
     heroSlides: [{
@@ -122,6 +132,14 @@ const websiteSettingsSchema = new mongoose.Schema(
     customDomain: {
       type: String,
       default: null,
+    },
+    // Search & social previews (public storefront meta tags)
+    seo: {
+      title: { type: String },
+      metaDescription: { type: String },
+      keywords: { type: String },
+      ogImageUrl: { type: String },
+      noIndex: { type: Boolean, default: false },
     },
     // AI chat / voice agent (customer-facing; secrets stay server-side)
     aiAgents: {

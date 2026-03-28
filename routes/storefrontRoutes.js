@@ -251,15 +251,25 @@ router.get(
 
       const ai = w.aiAgents || {};
       const logoFallback = restaurant.settings?.restaurantLogoUrl || null;
+      const seo = w.seo || {};
       res.json({
         slug: w.subdomain,
         name: w.name,
         template: w.template || 'classic',
         isPublic: w.isPublic,
         logoUrl: w.logoUrl || logoFallback || null,
+        faviconUrl: w.faviconUrl || null,
         bannerUrl: w.bannerUrl || null,
         description: w.description || '',
         tagline: w.tagline || '',
+        heroType: w.heroType === 'banner' ? 'banner' : 'slides',
+        seo: {
+          title: seo.title || '',
+          metaDescription: seo.metaDescription || '',
+          keywords: seo.keywords || '',
+          ogImageUrl: seo.ogImageUrl || null,
+          noIndex: seo.noIndex === true,
+        },
         contactPhone: w.contactPhone || '',
         contactEmail: w.contactEmail || '',
         address: w.address || '',
@@ -477,6 +487,7 @@ router.get(
           contactEmail: websiteConfig.contactEmail,
           address: websiteConfig.address,
           subdomain: websiteConfig.subdomain,
+          heroType: websiteConfig.heroType === 'banner' ? 'banner' : 'slides',
           heroSlides: websiteConfig.heroSlides || [],
           socialMedia: websiteConfig.socialMedia || {},
           themeColors: websiteConfig.themeColors || { primary: '#EF4444', secondary: '#FFA500' },

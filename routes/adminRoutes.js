@@ -2838,6 +2838,7 @@ router.put('/website', async (req, res, next) => {
     const {
       name,
       logoUrl,
+      faviconUrl,
       bannerUrl,
       description,
       tagline,
@@ -2852,7 +2853,9 @@ router.put('/website', async (req, res, next) => {
       websiteSections,
       allowWebsiteOrders,
       template,
+      heroType,
       customDomain,
+      seo,
     } = req.body;
     const restaurantId = getRestaurantIdForRequest(req);
     const branchId = getBranchIdForRequest(req);
@@ -2872,6 +2875,7 @@ router.put('/website', async (req, res, next) => {
     // Basic fields (always global across branches)
     if (name !== undefined) restaurant.website.name = name;
     if (logoUrl !== undefined) restaurant.website.logoUrl = logoUrl;
+    if (faviconUrl !== undefined) restaurant.website.faviconUrl = faviconUrl;
     if (bannerUrl !== undefined) restaurant.website.bannerUrl = bannerUrl;
     if (description !== undefined) restaurant.website.description = description;
     if (tagline !== undefined) restaurant.website.tagline = tagline;
@@ -2880,6 +2884,36 @@ router.put('/website', async (req, res, next) => {
     if (address !== undefined) restaurant.website.address = address;
     if (typeof isPublic === 'boolean') restaurant.website.isPublic = isPublic;
     if (template !== undefined) restaurant.website.template = template;
+    if (heroType !== undefined) {
+      const h = String(heroType).toLowerCase();
+      if (h === 'banner' || h === 'slides') restaurant.website.heroType = h;
+    }
+    if (seo !== undefined && typeof seo === 'object' && seo !== null) {
+      if (!restaurant.website.seo) restaurant.website.seo = {};
+      const {
+        title: seoTitle,
+        metaDescription: seoMetaDescription,
+        keywords: seoKeywords,
+        ogImageUrl: seoOgImageUrl,
+        noIndex: seoNoIndex,
+      } = seo;
+      if (seoTitle !== undefined) {
+        restaurant.website.seo.title =
+          typeof seoTitle === 'string' ? seoTitle.trim().slice(0, 200) : seoTitle;
+      }
+      if (seoMetaDescription !== undefined) {
+        restaurant.website.seo.metaDescription =
+          typeof seoMetaDescription === 'string'
+            ? seoMetaDescription.trim().slice(0, 500)
+            : seoMetaDescription;
+      }
+      if (seoKeywords !== undefined) {
+        restaurant.website.seo.keywords =
+          typeof seoKeywords === 'string' ? seoKeywords.trim().slice(0, 500) : seoKeywords;
+      }
+      if (seoOgImageUrl !== undefined) restaurant.website.seo.ogImageUrl = seoOgImageUrl;
+      if (typeof seoNoIndex === 'boolean') restaurant.website.seo.noIndex = seoNoIndex;
+    }
     if (customDomain !== undefined) {
       const normalizedDomain = normalizeCustomDomain(customDomain);
 
