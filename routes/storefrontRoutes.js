@@ -12,6 +12,12 @@ const AgentConversation = require('../models/AgentConversation');
 const { generateOrderNumber } = require('../utils/orderNumber');
 const { getOrderRooms } = require('../utils/socketRooms');
 const crypto = require('crypto');
+const storefrontAuthRoutes = require('./storefrontAuthRoutes');
+const { normalizeEmail, normalizePhone } = require('../utils/storefrontIdentifiers');
+const {
+  authenticateStorefrontCustomer,
+  optionalStorefrontCustomer,
+} = require('../middleware/storefrontCustomerAuth');
 
 const router = express.Router();
 
@@ -216,6 +222,11 @@ router.get(
     }
   }
 );
+
+// ---------------------------------------------------------------------------
+// POST /api/storefront/:slug/auth/* — customer accounts (order tracking)
+// ---------------------------------------------------------------------------
+router.use('/:slug/auth', storefrontAuthRoutes);
 
 // ---------------------------------------------------------------------------
 // GET /api/storefront/:slug/config
@@ -631,11 +642,75 @@ router.post(
 );
 
 // ---------------------------------------------------------------------------
+// GET /api/storefront/:slug/orders/mine — logged-in customer order history
+// ---------------------------------------------------------------------------
+router.get(
+  '/:slug/orders/mine',
+  rateLimit({ windowMs: 60000, max: 60 }),
+  authenticateStorefrontCustomer,
+  async (req, res, next) => {
+    try {
+      const restaurant = await resolveBySlug(req.params.slug);
+      if (!restaurant) return res.status(404).json({ message: 'Restaurant not found' });
+      if (!restaurant._id.equals(req.storefrontCustomer.restaurant)) {
+        return res.status(403).json({ message: 'Forbidden' });
+      }
+
+      const c = req.storefrontCustomer;
+      const clauses = [{ storefrontCustomer: c._id }];
+      if (c.phone) {
+        clauses.push({ source: 'WEBSITE', customerPhoneDigits: c.phone });
+      }
+      if (c.email) {
+        clauses.push({ source: 'WEBSITE', customerEmail: c.email });
+      }
+
+      const orders = await Order.find({
+        restaurant: restaurant._id,
+        $or: clauses,
+      })
+        .sort({ createdAt: -1 })
+        .limit(50)
+        .select(
+          'orderNumber status total subtotal createdAt deliveryAddress customerName customerPhone customerEmail items paymentMethod orderType'
+        )
+        .lean();
+
+      res.json({
+        orders: orders.map((o) => ({
+          id: o._id.toString(),
+          orderNumber: o.orderNumber,
+          status: o.status,
+          total: o.total,
+          subtotal: o.subtotal,
+          createdAt: o.createdAt,
+          deliveryAddress: o.deliveryAddress || '',
+          customerName: o.customerName || '',
+          customerPhone: o.customerPhone || '',
+          customerEmail: o.customerEmail || '',
+          paymentMethod: o.paymentMethod,
+          orderType: o.orderType,
+          items: (o.items || []).map((it) => ({
+            name: it.name,
+            quantity: it.quantity,
+            unitPrice: it.unitPrice,
+            lineTotal: it.lineTotal,
+          })),
+        })),
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
 // POST /api/storefront/:slug/orders
 // ---------------------------------------------------------------------------
 router.post(
   '/:slug/orders',
   rateLimit({ windowMs: 60000, max: 10 }),
+  optionalStorefrontCustomer,
   async (req, res, next) => {
     try {
       const restaurant = await resolveBySlug(req.params.slug);
@@ -648,10 +723,19 @@ router.post(
         return res.status(403).json({ message: 'Online ordering is temporarily unavailable. Please contact the restaurant directly.' });
       }
 
-      const { customerName, customerPhone, deliveryAddress, items, branchId } = req.body;
+      const { customerName, customerPhone, customerEmail, deliveryAddress, items, branchId } = req.body;
 
       if (!customerPhone || !customerPhone.trim()) {
         return res.status(400).json({ message: 'Phone number is required' });
+      }
+
+      const phoneTrim = customerPhone.trim();
+      const customerPhoneDigits = normalizePhone(phoneTrim) || phoneTrim.replace(/\D/g, '') || '';
+      const emailNorm = normalizeEmail(customerEmail);
+
+      let storefrontCustomerId = null;
+      if (req.storefrontCustomer) {
+        storefrontCustomerId = req.storefrontCustomer._id;
       }
       if (!items || !Array.isArray(items) || items.length === 0) {
         return res.status(400).json({ message: 'At least one item is required' });
@@ -705,7 +789,7 @@ router.post(
 
       try {
         await Customer.findOneAndUpdate(
-          { restaurant: restaurant._id, branch: branch ? branch._id : null, phone: customerPhone.trim() },
+          { restaurant: restaurant._id, branch: branch ? branch._id : null, phone: phoneTrim },
           {
             $set: {
               name: (customerName || '').trim() || 'Website Customer',
@@ -716,7 +800,7 @@ router.post(
             $setOnInsert: {
               restaurant: restaurant._id,
               branch: branch ? branch._id : null,
-              phone: customerPhone.trim(),
+              phone: phoneTrim,
             },
           },
           { upsert: true }
@@ -731,7 +815,10 @@ router.post(
         source: 'WEBSITE',
         status: 'NEW_ORDER',
         customerName: (customerName || '').trim() || 'Website Customer',
-        customerPhone: customerPhone.trim(),
+        customerPhone: phoneTrim,
+        customerPhoneDigits,
+        customerEmail: emailNorm || '',
+        storefrontCustomer: storefrontCustomerId,
         deliveryAddress: (deliveryAddress || '').trim(),
         items: orderItems,
         subtotal,

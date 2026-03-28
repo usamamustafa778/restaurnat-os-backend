@@ -145,6 +145,23 @@ const orderSchema = new mongoose.Schema(
       type: String,
       default: '',
     },
+    /** Digits-only normalization for WEBSITE orders (guest ↔ account linking). */
+    customerPhoneDigits: {
+      type: String,
+      default: '',
+    },
+    customerEmail: {
+      type: String,
+      default: '',
+      lowercase: true,
+      trim: true,
+    },
+    storefrontCustomer: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'StorefrontCustomer',
+      default: null,
+      index: true,
+    },
     deliveryAddress: {
       type: String,
       default: '',

@@ -1,10 +1,12 @@
 const express = require('express');
+const mongoose = require('mongoose');
 const Category = require('../models/Category');
 const MenuItem = require('../models/MenuItem');
 const InventoryItem = require('../models/InventoryItem');
 const BranchInventory = require('../models/BranchInventory');
 const BranchMenuItem = require('../models/BranchMenuItem');
 const Customer = require('../models/Customer');
+const StorefrontCustomer = require('../models/StorefrontCustomer');
 const Order = require('../models/Order');
 const User = require('../models/User');
 const UserBranch = require('../models/UserBranch');
@@ -18,6 +20,8 @@ const DaySession = require('../models/DaySession');
 const AgentConversation = require('../models/AgentConversation');
 const { protect, requireRole, requireRestaurant, checkSubscriptionStatus, resolveBranch } = require('../middleware/authMiddleware');
 const { getOrderRooms } = require('../utils/socketRooms');
+const { normalizeEmail, normalizePhone } = require('../utils/storefrontIdentifiers');
+const escapeRegex = require('../utils/escapeRegex');
 
 const router = express.Router();
 const VERCEL_API_BASE = 'https://api.vercel.com';
@@ -699,7 +703,29 @@ const mapCustomer = (customer) => ({
   totalSpent: customer.totalSpent || 0,
   lastOrderAt: customer.lastOrderAt || null,
   createdAt: customer.createdAt?.toISOString?.(),
+  source: 'POS / branch',
+  recordType: 'pos',
 });
+
+function mapStorefrontCustomerRow(doc) {
+  const name = `${doc.firstName || ''} ${doc.lastName || ''}`.trim();
+  return {
+    id: doc._id.toString(),
+    name: name || '—',
+    phone: doc.phone || '',
+    email: doc.email || '',
+    address: '',
+    notes: '',
+    branchId: null,
+    totalOrders: 0,
+    totalSpent: 0,
+    lastOrderAt: null,
+    createdAt: doc.createdAt?.toISOString?.(),
+    source: 'Website',
+    recordType: 'website',
+    verified: !!doc.verified,
+  };
+}
 
 const mapOrder = (order) => {
   const paymentLabels = {
@@ -4078,21 +4104,227 @@ router.delete('/users/:id', async (req, res, next) => {
 // CUSTOMER ROUTES
 
 // @route   GET /api/admin/customers
-// @desc    List customers. With x-branch-id: customers for that branch. ?allBranches=true: all (owner only).
+// @desc    List customers with filters & pagination. ?forPos=true returns a plain array (POS picker). Otherwise { customers, page, pageSize, total, totalPages, capped }.
 // @access  Restaurant Admin / Super Admin
 router.get('/customers', async (req, res, next) => {
   try {
     const restaurantId = getRestaurantIdForRequest(req);
+    if (!restaurantId) {
+      return res.status(400).json({ message: 'Restaurant context is required' });
+    }
     const branchId = getBranchIdForRequest(req);
     const allBranches = req.query.allBranches === 'true';
+    const forPos = req.query.forPos === 'true';
 
-    const query = { restaurant: restaurantId };
+    const q = String(req.query.q || '').trim();
+    const sourceFilter = String(req.query.source || 'all').toLowerCase();
+    const verifiedOnly = req.query.verifiedOnly === 'true';
+    const hasPhone = req.query.hasPhone === 'true';
+    const hasEmail = req.query.hasEmail === 'true';
+    const sortBy = String(req.query.sort || 'recent').toLowerCase();
+
+    const minOrdersRaw = parseInt(req.query.minOrders, 10);
+    const minOrders = Number.isFinite(minOrdersRaw) && minOrdersRaw > 0 ? minOrdersRaw : null;
+    const minSpentRaw = parseFloat(req.query.minSpent);
+    const minSpent = Number.isFinite(minSpentRaw) && minSpentRaw > 0 ? minSpentRaw : null;
+
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const pageSizeRaw = parseInt(req.query.pageSize, 10) || (forPos ? 500 : 25);
+    const pageSize = forPos
+      ? Math.min(Math.max(pageSizeRaw, 1), 1000)
+      : Math.min(Math.max(pageSizeRaw, 1), 100);
+
+    const maxPer = 2500;
+    const fetchPos = sourceFilter !== 'website';
+    const fetchWeb = sourceFilter !== 'pos';
+
+    const posQuery = { restaurant: restaurantId };
     if (branchId && !allBranches) {
-      query.branch = branchId;
+      posQuery.branch = branchId;
+    }
+    if (q) {
+      const rx = new RegExp(escapeRegex(q), 'i');
+      posQuery.$or = [{ name: rx }, { phone: rx }, { email: rx }];
+    }
+    if (hasPhone) {
+      posQuery.phone = { $exists: true, $nin: [null, ''] };
+    }
+    if (hasEmail) {
+      posQuery.email = { $exists: true, $nin: [null, ''] };
     }
 
-    const customers = await Customer.find(query).sort({ lastOrderAt: -1, createdAt: -1 }).limit(500).lean();
-    res.json(customers.map(mapCustomer));
+    const webQuery = { restaurant: restaurantId };
+    if (verifiedOnly) {
+      webQuery.verified = true;
+    }
+    if (q) {
+      const rx = new RegExp(escapeRegex(q), 'i');
+      webQuery.$or = [{ firstName: rx }, { lastName: rx }, { email: rx }, { phone: rx }];
+    }
+    if (hasPhone) {
+      webQuery.phone = { $exists: true, $nin: [null, ''] };
+    }
+    if (hasEmail) {
+      webQuery.email = { $exists: true, $nin: [null, ''] };
+    }
+
+    const [posCustomers, webCustomers] = await Promise.all([
+      fetchPos
+        ? Customer.find(posQuery).sort({ lastOrderAt: -1, createdAt: -1 }).limit(maxPer).lean()
+        : Promise.resolve([]),
+      fetchWeb
+        ? StorefrontCustomer.find(webQuery).sort({ updatedAt: -1, createdAt: -1 }).limit(maxPer).lean()
+        : Promise.resolve([]),
+    ]);
+
+    const posRows = posCustomers.map((c) => {
+      const row = mapCustomer(c);
+      const t = c.lastOrderAt || c.createdAt;
+      return { ...row, _sortAt: t ? new Date(t).getTime() : 0 };
+    });
+    const webRows = webCustomers.map((doc) => {
+      const row = mapStorefrontCustomerRow(doc);
+      const t = doc.updatedAt || doc.createdAt;
+      return { ...row, _sortAt: t ? new Date(t).getTime() : 0 };
+    });
+
+    let combined = [...posRows, ...webRows];
+
+    if (minOrders != null) {
+      combined = combined.filter((r) => (r.totalOrders || 0) >= minOrders);
+    }
+    if (minSpent != null) {
+      combined = combined.filter((r) => (r.totalSpent || 0) >= minSpent);
+    }
+
+    if (sortBy === 'name') {
+      combined.sort((a, b) =>
+        String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base' })
+      );
+    } else if (sortBy === 'spent') {
+      combined.sort((a, b) => (b.totalSpent || 0) - (a.totalSpent || 0));
+    } else {
+      combined.sort((a, b) => b._sortAt - a._sortAt);
+    }
+
+    const strip = (rows) => rows.map(({ _sortAt, ...rest }) => rest);
+
+    if (forPos) {
+      const slice = strip(combined).slice(0, pageSize);
+      return res.json(slice);
+    }
+
+    const total = combined.length;
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    const safePage = Math.min(page, totalPages);
+    const start = (safePage - 1) * pageSize;
+    const customers = strip(combined.slice(start, start + pageSize));
+
+    res.json({
+      customers,
+      page: safePage,
+      pageSize,
+      total,
+      totalPages,
+      capped: posCustomers.length >= maxPer || webCustomers.length >= maxPer,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @route   GET /api/admin/customers/:id/order-history
+// @desc    Orders linked to a POS customer or website account (same restaurant)
+// @access  Restaurant Admin / Super Admin
+router.get('/customers/:id/order-history', async (req, res, next) => {
+  try {
+    const restaurantId = getRestaurantIdForRequest(req);
+    if (!restaurantId) {
+      return res.status(400).json({ message: 'Restaurant context is required' });
+    }
+    const { id } = req.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({ message: 'Invalid customer id' });
+    }
+
+    const posDoc = await Customer.findOne({ _id: id, restaurant: restaurantId }).lean();
+    const webDoc = posDoc
+      ? null
+      : await StorefrontCustomer.findOne({ _id: id, restaurant: restaurantId }).lean();
+
+    const profile = posDoc ? mapCustomer(posDoc) : webDoc ? mapStorefrontCustomerRow(webDoc) : null;
+
+    if (!profile) {
+      return res.status(404).json({ message: 'Customer not found' });
+    }
+
+    const recordType = posDoc ? 'pos' : 'website';
+    const orClauses = [];
+
+    if (posDoc) {
+      orClauses.push({ customer: posDoc._id });
+      const phoneDigits =
+        normalizePhone(posDoc.phone) || String(posDoc.phone || '').replace(/\D/g, '');
+      if (phoneDigits) {
+        orClauses.push({ source: 'WEBSITE', customerPhoneDigits: phoneDigits });
+      }
+      const phoneTrim = String(posDoc.phone || '').trim();
+      if (phoneTrim) {
+        orClauses.push({ source: 'WEBSITE', customerPhone: phoneTrim });
+      }
+      const em = normalizeEmail(posDoc.email);
+      if (em) {
+        orClauses.push({ source: 'WEBSITE', customerEmail: em });
+      }
+    } else if (webDoc) {
+      orClauses.push({ storefrontCustomer: webDoc._id });
+      if (webDoc.phone) {
+        orClauses.push({ source: 'WEBSITE', customerPhoneDigits: webDoc.phone });
+      }
+      const em = normalizeEmail(webDoc.email);
+      if (em) {
+        orClauses.push({ source: 'WEBSITE', customerEmail: em });
+      }
+    }
+
+    const orders = await Order.find({
+      restaurant: restaurantId,
+      $or: orClauses,
+    })
+      .sort({ createdAt: -1 })
+      .limit(150)
+      .populate('branch', 'name')
+      .select(
+        'orderNumber status source orderType total subtotal createdAt customerName customerPhone deliveryAddress items paymentMethod branch storefrontCustomer customer'
+      )
+      .lean();
+
+    res.json({
+      customer: { ...profile, recordType },
+      orderCount: orders.length,
+      orders: orders.map((o) => ({
+        id: o._id.toString(),
+        orderNumber: o.orderNumber,
+        status: o.status,
+        source: o.source,
+        orderType: o.orderType,
+        total: o.total,
+        subtotal: o.subtotal,
+        createdAt: o.createdAt,
+        paymentMethod: o.paymentMethod,
+        customerName: o.customerName || '',
+        customerPhone: o.customerPhone || '',
+        deliveryAddress: o.deliveryAddress || '',
+        branchName: (o.branch && o.branch.name) || '',
+        itemCount: (o.items || []).length,
+        items: (o.items || []).map((it) => ({
+          name: it.name,
+          quantity: it.quantity,
+          lineTotal: it.lineTotal,
+          unitPrice: it.unitPrice,
+        })),
+      })),
+    });
   } catch (error) {
     next(error);
   }
