@@ -1541,7 +1541,7 @@ router.put('/orders/:id/collect-payment', async (req, res, next) => {
       order.splitOnlineAmount = onlinePart;
       order.splitOnlineProvider = onlinePart > 0 ? paymentProvider : null;
     } else {
-      order.paymentProvider = paymentMethod === 'ONLINE' ? paymentProvider : null;
+    order.paymentProvider = paymentMethod === 'ONLINE' ? paymentProvider : null;
       order.splitCashAmount = null;
       order.splitCardAmount = null;
       order.splitOnlineAmount = null;
@@ -3248,11 +3248,11 @@ router.get('/reports/sales', async (req, res, next) => {
           paymentMethodMap[methodKey].amount += amount;
         }
       } else {
-        paymentDistribution[pm] = (paymentDistribution[pm] || 0) + orderRevenue;
-        // Aggregate payment method rows (counts + amount)
-        if (!paymentMethodMap[pm]) paymentMethodMap[pm] = { orders: 0, amount: 0 };
-        paymentMethodMap[pm].orders += 1;
-        paymentMethodMap[pm].amount += orderRevenue;
+      paymentDistribution[pm] = (paymentDistribution[pm] || 0) + orderRevenue;
+      // Aggregate payment method rows (counts + amount)
+      if (!paymentMethodMap[pm]) paymentMethodMap[pm] = { orders: 0, amount: 0 };
+      paymentMethodMap[pm].orders += 1;
+      paymentMethodMap[pm].amount += orderRevenue;
       }
 
       // Aggregate order type rows
@@ -3571,9 +3571,9 @@ router.get('/reports/day', async (req, res, next) => {
           pm[methodKey].amount += amount;
         }
       } else {
-        if (!pm[m]) pm[m] = { orders: 0, amount: 0 };
-        pm[m].orders++;
-        pm[m].amount += o.grandTotal ?? o.total;
+      if (!pm[m]) pm[m] = { orders: 0, amount: 0 };
+      pm[m].orders++;
+      pm[m].amount += o.grandTotal ?? o.total;
       }
     }
     const pmLabels = { CASH: 'Cash', CARD: 'Card', ONLINE: 'Online', OTHER: 'Foodpanda' };
