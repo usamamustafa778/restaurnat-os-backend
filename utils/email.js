@@ -31,11 +31,12 @@ function getTransporter() {
   return transporter;
 }
 
+/** Must match the mailbox your SMTP provider expects (same as tenant verification OTP). */
 const FROM =
   process.env.EMAIL_FROM ||
   process.env.MAIL_FROM ||
   process.env.SMTP_USER ||
-  'Eats Desk <no-reply@eatsdesk.com>';
+  'Eats Desk <noreply@eatsdesk.com>';
 
 async function sendEmail({ to, subject, text, html }) {
   const tx = getTransporter();

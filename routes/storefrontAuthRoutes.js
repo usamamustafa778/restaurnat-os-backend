@@ -65,6 +65,18 @@ async function sendOtpSms(phoneDigits, code) {
   return { sent: false, error: 'SMS_NOT_IMPLEMENTED' };
 }
 
+/**
+ * Expose OTP in API JSON when email failed — helps local dev (NODE_ENV often unset).
+ * In production, only if STOREFRONT_DEV_OTP_RESPONSE=1 (avoid in real prod). Use STOREFRONT_DEV_OTP_RESPONSE=0 to disable everywhere.
+ */
+function maybeDevOtpInResponse(sent, otp) {
+  if (sent) return {};
+  if (process.env.STOREFRONT_DEV_OTP_RESPONSE === '0') return {};
+  const isProd = process.env.NODE_ENV === 'production';
+  if (isProd && process.env.STOREFRONT_DEV_OTP_RESPONSE !== '1') return {};
+  return { devOtp: otp };
+}
+
 // POST /api/storefront/:slug/auth/lookup
 router.post('/lookup', rateAuth({ max: 40 }), async (req, res, next) => {
   try {
@@ -156,14 +168,16 @@ router.post('/send-signup-otp', rateAuth({ max: 8 }), async (req, res, next) => 
 
       const { sent, error } = await sendOtpEmail(email, otp, 'Sign up');
       if (!sent) {
-        console.warn('[storefront-auth] signup OTP email not sent:', error);
+        console.warn('[storefront-auth] signup OTP email not sent:', error, 'otp=', otp);
       }
 
       return res.json({
         message: sent
           ? 'Verification code sent to your email.'
-          : 'Verification code created (email could not be sent — check server logs in development).',
+          : 'Verification code could not be emailed. Set EMAIL_USER and EMAIL_PASS (and EMAIL_HOST/PORT if needed) on the API server. Check spam folder if SMTP is configured.',
         sent,
+        ...(!sent && error ? { emailError: String(error) } : {}),
+        ...maybeDevOtpInResponse(sent, otp),
       });
     }
 
@@ -395,10 +409,14 @@ router.post('/send-login-otp', rateAuth({ max: 8 }), async (req, res, next) => {
       doc.loginOtpExpires = loginOtpExpires;
       await doc.save();
       const { sent, error } = await sendOtpEmail(email, otp, 'Login');
-      if (!sent) console.warn('[storefront-auth] login OTP email not sent:', error);
+      if (!sent) console.warn('[storefront-auth] login OTP email not sent:', error, 'otp=', otp);
       return res.json({
-        message: sent ? 'Login code sent to your email.' : 'Login code generated (check server logs if email is disabled).',
+        message: sent
+          ? 'Login code sent to your email.'
+          : 'Login code could not be emailed. Set EMAIL_USER and EMAIL_PASS on the API server.',
         sent,
+        ...(!sent && error ? { emailError: String(error) } : {}),
+        ...maybeDevOtpInResponse(sent, otp),
       });
     }
 
