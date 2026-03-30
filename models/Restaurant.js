@@ -112,6 +112,14 @@ const websiteSettingsSchema = new mongoose.Schema(
       type: Boolean,
       default: true,
     },
+    /** Named delivery zones with flat fees (website, POS, rider). Empty = free-text address only. */
+    deliveryLocations: [
+      {
+        name: { type: String, required: true, trim: true, maxlength: 120 },
+        fee: { type: Number, required: true, min: 0, default: 0 },
+        sortOrder: { type: Number, default: 0 },
+      },
+    ],
     // Website Sections – up to 3 customizable sections for the public website
     websiteSections: [{
       title: { type: String, default: '' },

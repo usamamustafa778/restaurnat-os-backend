@@ -22,6 +22,7 @@ const { protect, requireRole, requireRestaurant, checkSubscriptionStatus, resolv
 const { getOrderRooms } = require('../utils/socketRooms');
 const { normalizeEmail, normalizePhone } = require('../utils/storefrontIdentifiers');
 const escapeRegex = require('../utils/escapeRegex');
+const { sanitizeDeliveryLocationsInput } = require('../utils/deliveryLocations');
 
 const router = express.Router();
 const VERCEL_API_BASE = 'https://api.vercel.com';
@@ -108,6 +109,14 @@ const mapBranch = (branch) => ({
   showWaiterPos: branch.showWaiterPos !== false,
   showCustomerPos: branch.showCustomerPos !== false,
   businessDayCutoffHour: branch.businessDayCutoffHour ?? 4,
+  deliveryLocations: Array.isArray(branch.websiteOverrides?.deliveryLocations)
+    ? branch.websiteOverrides.deliveryLocations.map((l) => ({
+        _id: l._id ? l._id.toString() : undefined,
+        name: l.name,
+        fee: l.fee ?? 0,
+        sortOrder: l.sortOrder ?? 0,
+      }))
+    : [],
   createdAt: branch.createdAt?.toISOString?.(),
   updatedAt: branch.updatedAt?.toISOString?.(),
 });
@@ -628,6 +637,36 @@ router.post('/branches/:id/restore', async (req, res, next) => {
     branch.isDeleted = false;
     branch.deletedAt = null;
     branch.status = 'active';
+    await branch.save();
+    res.json(mapBranch(branch));
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @route   PUT /api/admin/branches/:id/delivery-zones
+// @desc    Update delivery zones for a specific branch (stored in branch.websiteOverrides)
+// @access  Restaurant Admin / Super Admin / Manager with branch access
+router.put('/branches/:id/delivery-zones', async (req, res, next) => {
+  try {
+    const restaurantId = getRestaurantIdForRequest(req);
+    const branch = await Branch.findOne({ _id: req.params.id, restaurant: restaurantId, isDeleted: { $ne: true } });
+    if (!branch) {
+      return res.status(404).json({ message: 'Branch not found' });
+    }
+    if (
+      req.user.role !== 'super_admin' &&
+      req.user.role !== 'restaurant_admin' &&
+      (!req.user.allowedBranchIds || !req.user.allowedBranchIds.includes(branch._id.toString()))
+    ) {
+      return res.status(403).json({ message: 'Access denied to this branch' });
+    }
+    const { deliveryLocations } = req.body;
+    if (!branch.websiteOverrides) {
+      branch.websiteOverrides = {};
+    }
+    branch.websiteOverrides.deliveryLocations = sanitizeDeliveryLocationsInput(deliveryLocations ?? []);
+    branch.markModified('websiteOverrides');
     await branch.save();
     res.json(mapBranch(branch));
   } catch (error) {
@@ -2556,6 +2595,7 @@ router.get('/website', async (req, res, next) => {
         'openingHoursText',
         'websiteSections',
         'allowWebsiteOrders',
+        'deliveryLocations',
       ];
       overrideKeys.forEach((key) => {
         if (overrides[key] !== undefined) {
@@ -2852,6 +2892,7 @@ router.put('/website', async (req, res, next) => {
       openingHoursText,
       websiteSections,
       allowWebsiteOrders,
+      deliveryLocations,
       template,
       heroType,
       customDomain,
@@ -2985,6 +3026,7 @@ router.put('/website', async (req, res, next) => {
       'openingHoursText',
       'websiteSections',
       'allowWebsiteOrders',
+      'deliveryLocations',
     ];
 
     // Helper to assign either globally or into branch overrides
@@ -3021,6 +3063,9 @@ router.put('/website', async (req, res, next) => {
     assignField('openingHoursText', openingHoursText);
     assignField('websiteSections', websiteSections);
     assignField('allowWebsiteOrders', typeof allowWebsiteOrders === 'boolean' ? allowWebsiteOrders : undefined);
+    if (deliveryLocations !== undefined && deliveryLocations !== null) {
+      assignField('deliveryLocations', sanitizeDeliveryLocationsInput(deliveryLocations));
+    }
 
     restaurant.markModified('website');
     await restaurant.save();

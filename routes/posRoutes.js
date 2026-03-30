@@ -1,4 +1,5 @@
 const express = require('express');
+const mongoose = require('mongoose');
 const MenuItem = require('../models/MenuItem');
 const InventoryItem = require('../models/InventoryItem');
 const BranchInventory = require('../models/BranchInventory');
@@ -11,6 +12,7 @@ const DaySession = require('../models/DaySession');
 const Deal = require('../models/Deal');
 const { protect, requireRole, requireRestaurant, checkSubscriptionStatus } = require('../middleware/authMiddleware');
 const { generateOrderNumber } = require('../utils/orderNumber');
+const { mergedDeliveryLocations, pickDeliveryLocation } = require('../utils/deliveryLocations');
 const { getOrderRooms } = require('../utils/socketRooms');
 const CLOSED_ORDER_STATUSES = ['DELIVERED', 'COMPLETED'];
 const PAID_ORDER_MATCH = {
@@ -155,7 +157,22 @@ function getMenuItemIngredientCost(menuItem, inventoryMap) {
 // @access  Staff / Restaurant Admin
 router.post('/orders', async (req, res, next) => {
   try {
-    const { items, orderType, paymentMethod, paymentProvider, discountAmount = 0, customerName = '', customerPhone = '', deliveryAddress = '', branchId, tableNumber, tableId, tableName, amountReceived } = req.body;
+    const {
+      items,
+      orderType,
+      paymentMethod,
+      paymentProvider,
+      discountAmount = 0,
+      customerName = '',
+      customerPhone = '',
+      deliveryAddress = '',
+      deliveryLocationId,
+      branchId,
+      tableNumber,
+      tableId,
+      tableName,
+      amountReceived,
+    } = req.body;
 
     if (!Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ message: 'Order items are required' });
@@ -290,7 +307,27 @@ router.post('/orders', async (req, res, next) => {
 
     // Total discount = manual discount from request + auto-savings from deal prices
     const discount = Math.max(0, (Number(discountAmount) || 0) + dealDiscount);
-    const total = Math.max(0, subtotal - discount);
+    const foodTotal = Math.max(0, subtotal - discount);
+
+    const deliveryZones = orderType === 'DELIVERY' ? mergedDeliveryLocations(req.restaurant, branch) : [];
+    let deliveryCharges = 0;
+    let deliveryLocationName = '';
+    let deliveryLocationObjectId = null;
+    if (orderType === 'DELIVERY' && deliveryZones.length > 0) {
+      const picked = pickDeliveryLocation(deliveryZones, deliveryLocationId);
+      if (!picked) {
+        return res.status(400).json({ message: 'deliveryLocationId is required and must match a configured delivery zone' });
+      }
+      deliveryCharges = Math.round(Math.max(0, picked.fee) * 100) / 100;
+      deliveryLocationName = picked.name;
+      const rawLocId = deliveryLocationId != null ? String(deliveryLocationId).trim() : '';
+      if (rawLocId && mongoose.Types.ObjectId.isValid(rawLocId)) {
+        deliveryLocationObjectId = new mongoose.Types.ObjectId(rawLocId);
+      }
+    }
+
+    const total = foodTotal;
+    const amountDue = Math.round((foodTotal + deliveryCharges) * 100) / 100;
 
     // Inventory deduction (branch-aware)
     const consumptionByInventoryId = new Map();
@@ -376,7 +413,7 @@ router.post('/orders', async (req, res, next) => {
           { restaurant: req.restaurant._id, branch: branch ? branch._id : null, phone: customerPhone.trim() },
           {
             $set: { name: customerName || 'Walk-in Customer', lastOrderAt: new Date() },
-            $inc: { totalOrders: 1, totalSpent: total },
+            $inc: { totalOrders: 1, totalSpent: amountDue },
             $setOnInsert: { restaurant: req.restaurant._id, branch: branch ? branch._id : null, phone: customerPhone.trim() },
           },
           { upsert: true }
@@ -410,9 +447,15 @@ router.post('/orders', async (req, res, next) => {
         ingredientCost += getMenuItemIngredientCost(menu, invCostMap) * orderItem.quantity;
       }
     }
-    const profit = Math.round((total - ingredientCost) * 100) / 100;
+    const profit = Math.round((foodTotal - ingredientCost) * 100) / 100;
 
     const tableNameTrimmed = (tableName || '').trim();
+
+    const addrNotes = (deliveryAddress || '').trim();
+    let deliveryAddressFinal = addrNotes;
+    if (orderType === 'DELIVERY' && deliveryZones.length > 0 && deliveryLocationName) {
+      deliveryAddressFinal = addrNotes ? `${deliveryLocationName} — ${addrNotes}` : deliveryLocationName;
+    }
 
     // When DINE_IN order has a table name, mark that table as occupied (isAvailable = false)
     if (orderType === 'DINE_IN' && tableNameTrimmed) {
@@ -427,9 +470,9 @@ router.post('/orders', async (req, res, next) => {
     let paymentAmountReturned = null;
     if (paidAtCreation && orderPaymentMethod === 'CASH' && amountReceived != null) {
       const received = Number(amountReceived);
-      if (!isNaN(received) && received >= total) {
+      if (!isNaN(received) && received >= amountDue) {
         paymentAmountReceived = received;
-        paymentAmountReturned = received - total;
+        paymentAmountReturned = received - amountDue;
       }
     }
 
@@ -468,7 +511,11 @@ router.post('/orders', async (req, res, next) => {
       profit,
       customerName: customerName || '',
       customerPhone: customerPhone || '',
-      deliveryAddress: deliveryAddress || '',
+      deliveryAddress: deliveryAddressFinal,
+      deliveryCharges,
+      deliveryLocationId: deliveryLocationObjectId || undefined,
+      deliveryLocationName: deliveryLocationName || undefined,
+      grandTotal: amountDue,
       orderNumber: await generateOrderNumber(req.restaurant._id, branch ? branch._id : null, 'ORD'),
       ...riderFields,
     });
@@ -485,7 +532,9 @@ router.post('/orders', async (req, res, next) => {
       orderNumber: order.orderNumber,
       subtotal: order.subtotal,
       discountAmount: order.discountAmount,
+      deliveryCharges: order.deliveryCharges ?? 0,
       total: order.total,
+      amountDue: amountDue,
       createdAt: order.createdAt,
     });
   } catch (error) {

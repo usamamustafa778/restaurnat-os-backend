@@ -122,6 +122,12 @@ const orderSchema = new mongoose.Schema(
     assignedRiderName: { type: String, default: '' },
     assignedRiderPhone: { type: String, default: '' },
     deliveryCharges: { type: Number, default: 0, min: 0 },
+    /** Matched zone from website.branch deliveryLocations (optional). */
+    deliveryLocationId: {
+      type: mongoose.Schema.Types.ObjectId,
+      default: null,
+    },
+    deliveryLocationName: { type: String, default: '' },
     deliveryPaymentCollected: { type: Boolean, default: false },
     status: {
       type: String,

@@ -20,6 +20,7 @@ const {
   optionalStorefrontCustomer,
 } = require('../middleware/storefrontCustomerAuth');
 const { storefrontCustomerToPublic } = require('../utils/storefrontCustomerPublic');
+const { mergedDeliveryLocations, pickDeliveryLocation, publicDeliveryZones } = require('../utils/deliveryLocations');
 
 const router = express.Router();
 
@@ -135,7 +136,7 @@ router.get(
         status: 'active',
       })
         .sort({ sortOrder: 1, createdAt: 1 })
-        .select('restaurant name address')
+        .select('restaurant name address websiteOverrides')
         .lean();
 
       const branchByRestaurant = new Map();
@@ -153,6 +154,9 @@ router.get(
         const b = branchByRestaurant.get(r._id.toString());
         const address = (b && b.address) || w.address || '';
         const name = w.name || slug;
+        const zones = mergedDeliveryLocations(r, b);
+        const fees = zones.map((z) => z.fee).filter((f) => Number.isFinite(f));
+        const minDeliveryFee = fees.length ? Math.min(...fees) : null;
 
         const blob = [name, address, w.tagline || '', w.description || '', slug].join(' ').toLowerCase();
         if (q && !blob.includes(q)) continue;
@@ -167,6 +171,8 @@ router.get(
           address: address || w.address || '',
           branchName: b?.name || '',
           allowWebsiteOrders: w.allowWebsiteOrders !== false,
+          deliveryZoneCount: zones.length,
+          minDeliveryFee,
         });
       }
 
@@ -251,6 +257,16 @@ router.get(
       const w = restaurant.website;
       setCacheHeaders(res, 60, 300);
 
+      const requestedBranchId = req.query.branchId ? String(req.query.branchId).trim() : null;
+      let branchForZones = null;
+      if (requestedBranchId) {
+        branchForZones = await Branch.findOne({
+          _id: requestedBranchId,
+          restaurant: restaurant._id,
+          status: 'active',
+        }).lean();
+      }
+
       const ai = w.aiAgents || {};
       const logoFallback = restaurant.settings?.restaurantLogoUrl || null;
       const seo = w.seo || {};
@@ -275,6 +291,7 @@ router.get(
         contactPhone: w.contactPhone || '',
         contactEmail: w.contactEmail || '',
         address: w.address || '',
+        deliveryZones: publicDeliveryZones(restaurant, branchForZones),
         heroSlides: (w.heroSlides || []).filter((s) => s.isActive),
         socialMedia: w.socialMedia || {},
         themeColors: w.themeColors || { primary: '#EF4444', secondary: '#FFA500' },
@@ -413,7 +430,15 @@ router.get(
       let websiteConfig = { ...baseWebsite };
       if (branchForWebsite && branchForWebsite.websiteOverrides) {
         const overrides = branchForWebsite.websiteOverrides;
-        ['heroSlides', 'socialMedia', 'themeColors', 'openingHoursText', 'websiteSections', 'allowWebsiteOrders'].forEach((key) => {
+        [
+          'heroSlides',
+          'socialMedia',
+          'themeColors',
+          'openingHoursText',
+          'websiteSections',
+          'allowWebsiteOrders',
+          'deliveryLocations',
+        ].forEach((key) => {
           if (overrides[key] !== undefined) websiteConfig[key] = overrides[key];
         });
       }
@@ -496,6 +521,7 @@ router.get(
           openingHoursText: websiteConfig.openingHoursText || '',
           websiteSections,
           allowWebsiteOrders: websiteConfig.allowWebsiteOrders !== false,
+          deliveryZones: publicDeliveryZones(restaurant, branchForWebsite),
         },
         menu: menuResponse,
         categories: categories.map((c) => ({
@@ -736,7 +762,8 @@ router.post(
         return res.status(403).json({ message: 'Online ordering is temporarily unavailable. Please contact the restaurant directly.' });
       }
 
-      const { customerName, customerPhone, customerEmail, deliveryAddress, items, branchId } = req.body;
+      const { customerName, customerPhone, customerEmail, deliveryAddress, deliveryLocationId, items, branchId } =
+        req.body || {};
 
       if (!customerPhone || !customerPhone.trim()) {
         return res.status(400).json({ message: 'Phone number is required' });
@@ -798,6 +825,26 @@ router.post(
         });
       }
 
+      const zones = mergedDeliveryLocations(restaurant, branch);
+      let deliveryCharges = 0;
+      let deliveryLocId = null;
+      let deliveryLocName = '';
+      let addressTrim = (deliveryAddress || '').trim();
+
+      if (zones.length > 0) {
+        const picked = pickDeliveryLocation(zones, deliveryLocationId);
+        if (!picked) {
+          return res.status(400).json({ message: 'Please select a valid delivery area' });
+        }
+        deliveryCharges = picked.fee;
+        deliveryLocName = picked.name;
+        deliveryLocId = deliveryLocationId ? String(deliveryLocationId).trim() : null;
+        addressTrim = deliveryLocName + (addressTrim ? ` — ${addressTrim}` : '');
+      }
+
+      const foodTotal = Math.round(subtotal * 100) / 100;
+      const deliveryChargesRounded = Math.round(deliveryCharges * 100) / 100;
+      const grandTotal = Math.round((foodTotal + deliveryChargesRounded) * 100) / 100;
       const orderNumber = await generateOrderNumber(restaurant._id, branch ? branch._id : null, 'WEB');
 
       try {
@@ -806,10 +853,10 @@ router.post(
           {
             $set: {
               name: (customerName || '').trim() || 'Website Customer',
-              address: (deliveryAddress || '').trim(),
+              address: addressTrim,
               lastOrderAt: new Date(),
             },
-            $inc: { totalOrders: 1, totalSpent: subtotal },
+            $inc: { totalOrders: 1, totalSpent: grandTotal },
             $setOnInsert: {
               restaurant: restaurant._id,
               branch: branch ? branch._id : null,
@@ -819,8 +866,6 @@ router.post(
           { upsert: true }
         );
       } catch (_) { /* non-critical */ }
-
-      const addressTrim = (deliveryAddress || '').trim();
 
       const order = await Order.create({
         restaurant: restaurant._id,
@@ -835,10 +880,14 @@ router.post(
         customerEmail: emailNorm || '',
         storefrontCustomer: storefrontCustomerId,
         deliveryAddress: addressTrim,
+        deliveryCharges: deliveryChargesRounded,
+        deliveryLocationId: deliveryLocId || undefined,
+        deliveryLocationName: deliveryLocName || undefined,
         items: orderItems,
         subtotal,
         discountAmount: 0,
-        total: subtotal,
+        total: foodTotal,
+        grandTotal,
         orderNumber,
       });
 
@@ -867,7 +916,9 @@ router.post(
       res.status(201).json({
         message: 'Order placed successfully!',
         orderNumber: order.orderNumber,
-        total: order.total,
+        subtotal: order.subtotal,
+        deliveryCharges: order.deliveryCharges || 0,
+        total: order.total + (order.deliveryCharges || 0),
         ...(customerPayload ? { customer: customerPayload } : {}),
       });
     } catch (error) {
