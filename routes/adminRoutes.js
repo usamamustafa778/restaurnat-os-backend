@@ -1094,7 +1094,7 @@ router.put('/orders/:id', async (req, res, next) => {
       return res.status(403).json({ message: 'Order takers can only view orders' });
     }
     const { id } = req.params;
-    const { items, discountAmount, customerName, customerPhone, deliveryAddress, orderType, tableName } = req.body;
+    const { items, discountAmount, customerName, customerPhone, deliveryAddress, orderType, tableName, deliveryCharges } = req.body;
     const restaurantId = getRestaurantIdForRequest(req);
 
     let order = null;
@@ -1158,6 +1158,10 @@ router.put('/orders/:id', async (req, res, next) => {
     if (deliveryAddress !== undefined) order.deliveryAddress = String(deliveryAddress || '').trim();
     if (orderType !== undefined && ['DINE_IN', 'TAKEAWAY', 'DELIVERY'].includes(orderType)) order.orderType = orderType;
     if (tableName !== undefined) order.tableName = String(tableName || '').trim();
+    if (deliveryCharges !== undefined) {
+      order.deliveryCharges = Math.max(0, Number(deliveryCharges) || 0);
+      order.grandTotal = (order.total || 0) + order.deliveryCharges;
+    }
 
     await order.save();
     const updated = await Order.findById(order._id).populate('createdBy', 'name role');
