@@ -15,6 +15,7 @@ const Branch = require('../models/Branch');
 const Table = require('../models/Table');
 const Reservation = require('../models/Reservation');
 const DailyCurrency = require('../models/DailyCurrency');
+const CashDrawerLog = require('../models/CashDrawerLog');
 const PaymentAccount = require('../models/PaymentAccount');
 const DaySession = require('../models/DaySession');
 const AgentConversation = require('../models/AgentConversation');
@@ -2847,6 +2848,7 @@ router.put('/settings', async (req, res, next) => {
       restaurantLogoUrl,
       restaurantLogoHeightPx,
       billFooterMessage,
+      currencyCode,
     } = req.body;
 
     if (typeof allowOrderWhenOutOfStock === 'boolean') {
@@ -2863,6 +2865,12 @@ router.put('/settings', async (req, res, next) => {
 
     if (typeof billFooterMessage === 'string') {
       restaurant.settings.billFooterMessage = billFooterMessage;
+    }
+
+    if (currencyCode !== undefined) {
+      const normalized =
+        typeof currencyCode === 'string' ? currencyCode.trim().toUpperCase() : '';
+      restaurant.settings.currencyCode = normalized || null;
     }
 
     // Mongoose won't detect nested-object mutations without this
@@ -3935,6 +3943,45 @@ router.put('/currency/daily', async (req, res, next) => {
       { new: true, upsert: true }
     );
     res.json({ date: doc.date, quantities: doc.quantities || {} });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @route   POST /api/admin/currency/drawer/open
+// @desc    Trigger manual cash drawer open and silently log audit event
+// @access  restaurant_admin / admin / manager / cashier / super_admin
+router.post('/currency/drawer/open', async (req, res, next) => {
+  try {
+    const allowedRoles = new Set([
+      'restaurant_admin',
+      'super_admin',
+      'admin',
+      'manager',
+      'cashier',
+    ]);
+    if (!allowedRoles.has(req.user?.role)) {
+      return res.status(403).json({ message: 'Not allowed to open drawer' });
+    }
+
+    const restaurantId = getRestaurantIdForRequest(req);
+    const branchId = getBranchIdForRequest(req);
+    const userId = req.user?._id || req.user?.id;
+    const reason =
+      typeof req.body?.reason === 'string' && req.body.reason.trim()
+        ? req.body.reason.trim()
+        : 'manual';
+
+    await CashDrawerLog.create({
+      restaurant: restaurantId,
+      branch: branchId || null,
+      user: userId,
+      reason,
+      openedAt: new Date(),
+    });
+
+    // Hardware integration hook intentionally no-op for now.
+    return res.json({ ok: true });
   } catch (error) {
     next(error);
   }

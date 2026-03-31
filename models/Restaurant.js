@@ -191,6 +191,14 @@ const restaurantSchema = new mongoose.Schema(
         type: String,
         default: 'Thank you for your order!',
       },
+      // Branch/tenant operating currency for POS and cash counting widgets.
+      // Empty means "not configured" and UI may fall back to manual mode.
+      currencyCode: {
+        type: String,
+        uppercase: true,
+        trim: true,
+        default: null,
+      },
     },
   },
   {
