@@ -2849,6 +2849,7 @@ router.put('/settings', async (req, res, next) => {
       restaurantLogoHeightPx,
       billFooterMessage,
       currencyCode,
+      currencyDenominations,
     } = req.body;
 
     if (typeof allowOrderWhenOutOfStock === 'boolean') {
@@ -2871,6 +2872,15 @@ router.put('/settings', async (req, res, next) => {
       const normalized =
         typeof currencyCode === 'string' ? currencyCode.trim().toUpperCase() : '';
       restaurant.settings.currencyCode = normalized || null;
+    }
+
+    if (Array.isArray(currencyDenominations)) {
+      const cleaned = currencyDenominations
+        .map((v) => Number(v))
+        .filter((v) => Number.isFinite(v) && v > 0);
+      restaurant.settings.currencyDenominations = Array.from(
+        new Set(cleaned)
+      ).sort((a, b) => b - a);
     }
 
     // Mongoose won't detect nested-object mutations without this

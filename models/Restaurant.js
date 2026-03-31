@@ -199,6 +199,11 @@ const restaurantSchema = new mongoose.Schema(
         trim: true,
         default: null,
       },
+      // Optional default denominations for manual cash counting (saved from dashboard).
+      currencyDenominations: {
+        type: [Number],
+        default: [],
+      },
     },
   },
   {
