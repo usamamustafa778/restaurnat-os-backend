@@ -792,7 +792,8 @@ const mapOrder = (order) => {
   const orderTakerName = createdByObj && createdByObj.name ? createdByObj.name : '';
   const createdByRole = createdByObj && createdByObj.role ? createdByObj.role : null;
   const normalizedTotal = Number(order.total) || 0;
-  const normalizedDeliveryCharges = Number(order.deliveryCharges) || 0;
+  // Delivery charges only apply to DELIVERY orders; zero them out for dine-in / takeaway.
+  const normalizedDeliveryCharges = order.orderType === 'DELIVERY' ? (Number(order.deliveryCharges) || 0) : 0;
   const normalizedGrandTotal = normalizedTotal + normalizedDeliveryCharges;
 
   return {
@@ -1157,25 +1158,33 @@ router.put('/orders/:id', async (req, res, next) => {
       order.subtotal = subtotal;
       order.discountAmount = discount;
       order.total = total;
-      // Keep grandTotal consistent with UI/order-card totals.
-      // grandTotal includes delivery charges (if any).
-      order.grandTotal = total + (Number(order.deliveryCharges) || 0);
     }
 
     if (discountAmount !== undefined && !(Array.isArray(items) && items.length > 0)) {
       order.discountAmount = Math.max(0, Number(discountAmount) || 0);
       order.total = Math.max(0, (order.subtotal || 0) - order.discountAmount);
-      order.grandTotal = order.total + (Number(order.deliveryCharges) || 0);
     }
     if (customerName !== undefined) order.customerName = String(customerName || '').trim();
     if (customerPhone !== undefined) order.customerPhone = String(customerPhone || '').trim();
-    if (deliveryAddress !== undefined) order.deliveryAddress = String(deliveryAddress || '').trim();
     if (orderType !== undefined && ['DINE_IN', 'TAKEAWAY', 'DELIVERY'].includes(orderType)) order.orderType = orderType;
     if (tableName !== undefined) order.tableName = String(tableName || '').trim();
-    if (deliveryCharges !== undefined) {
+    if (deliveryCharges !== undefined && order.orderType === 'DELIVERY') {
       order.deliveryCharges = Math.max(0, Number(deliveryCharges) || 0);
-      order.grandTotal = (order.total || 0) + order.deliveryCharges;
     }
+    if (deliveryAddress !== undefined && order.orderType === 'DELIVERY') {
+      order.deliveryAddress = String(deliveryAddress || '').trim();
+    }
+
+    // Enforce: non-delivery orders must have no delivery-specific data in the DB.
+    if (order.orderType !== 'DELIVERY') {
+      order.deliveryCharges = 0;
+      order.deliveryAddress = '';
+      order.deliveryLocationId = undefined;
+      order.deliveryLocationName = '';
+    }
+
+    // Recalculate grandTotal after all field mutations.
+    order.grandTotal = (order.total || 0) + (order.orderType === 'DELIVERY' ? (order.deliveryCharges || 0) : 0);
 
     await order.save();
     const updated = await Order.findById(order._id).populate('createdBy', 'name role');

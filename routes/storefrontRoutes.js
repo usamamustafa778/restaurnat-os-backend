@@ -390,7 +390,14 @@ router.get(
       // Use $ne: false so items created before the showOnWebsite field was added (field missing/null)
       // are treated as visible — matching the schema's default: true intent.
       const menuQuery = { restaurant: restaurant._id, available: true, showOnWebsite: { $ne: false } };
-      if (selectedBranchId) {
+
+      // Apply branch filter to item/category queries ONLY for multi-branch restaurants.
+      // For single-branch restaurants (activeBranches.length === 1), show ALL restaurant
+      // items regardless of their branch field — this ensures items created under a
+      // previously-active branch (now deactivated or reassigned) remain visible on the
+      // website. Branch filtering is meaningful only when multiple branches are active
+      // and the customer has selected one.
+      if (selectedBranchId && activeBranches.length > 1) {
         // Include items scoped to this branch AND items with branch:null (shared across all branches)
         categoryQuery.$or = [
           { branch: selectedBranchId },
