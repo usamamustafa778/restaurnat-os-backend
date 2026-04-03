@@ -31,7 +31,9 @@ const connectDB = async (mongoUri) => {
           await categoriesCol.dropIndex(indexName);
           console.log(`Dropped old category index: ${indexName}`);
         } catch (e) {
-          if (e.code !== 27 && e.codeName !== 'IndexNotFound') throw e;
+          // 26 = NamespaceNotFound (collection doesn't exist yet on empty DB)
+          // 27 = IndexNotFound (index was already dropped)
+          if (e.code !== 26 && e.code !== 27) throw e;
         }
       };
       await dropIfExists('name_1');

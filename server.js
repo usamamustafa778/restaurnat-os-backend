@@ -29,6 +29,13 @@ const menuRoutes = require('./routes/menuRoutes');
 const contactRoutes = require('./routes/contactRoutes');
 const riderRoutes = require('./routes/riderRoutes');
 const storefrontRoutes = require('./routes/storefrontRoutes');
+const accountingSetupRoutes    = require('./routes/accounting/setup');
+const accountingAccountsRoutes = require('./routes/accounting/accounts');
+const accountingPartiesRoutes  = require('./routes/accounting/parties');
+const accountingVouchersRoutes = require('./routes/accounting/vouchers');
+const accountingReportsRoutes  = require('./routes/accounting/reports');
+// Eagerly register accounting models so their indexes are created on startup
+require('./models/accounting');
 
 const app = express();
 const server = http.createServer(app);
@@ -117,6 +124,11 @@ app.use('/api/menu', menuRoutes);
 app.use('/api', contactRoutes);
 app.use('/api/rider', riderRoutes);
 app.use('/api/storefront', storefrontRoutes);
+app.use('/api/accounting/setup',    accountingSetupRoutes);
+app.use('/api/accounting/accounts', accountingAccountsRoutes);
+app.use('/api/accounting/parties',  accountingPartiesRoutes);
+app.use('/api/accounting/vouchers', accountingVouchersRoutes);
+app.use('/api/accounting/reports',  accountingReportsRoutes);
 
 // Health check
 app.get('/health', (req, res) => {

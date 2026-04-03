@@ -24,6 +24,7 @@ const { getOrderRooms } = require('../utils/socketRooms');
 const { normalizeEmail, normalizePhone } = require('../utils/storefrontIdentifiers');
 const escapeRegex = require('../utils/escapeRegex');
 const { sanitizeDeliveryLocationsInput } = require('../utils/deliveryLocations');
+const { autoPostOrder } = require('../services/accounting/autoPost');
 
 const router = express.Router();
 const VERCEL_API_BASE = 'https://api.vercel.com';
@@ -1285,6 +1286,13 @@ router.put('/orders/:id/status', async (req, res, next) => {
 
     await order.save();
 
+    // Auto-post accounting entry for completed orders (fire-and-forget — never blocks order flow)
+    if (status === 'DELIVERED') {
+      autoPostOrder(order._id, order.restaurant).catch((err) =>
+        console.error('[Accounting] autoPostOrder failed for order', order._id, err.message)
+      );
+    }
+
     const io = req.app.get('io');
     if (io) {
       const rooms = getOrderRooms(order.restaurant, order.branch);
@@ -1421,6 +1429,11 @@ router.put('/orders/:id/payment', async (req, res, next) => {
       order.statusHistory.push({ status: 'DELIVERED', at: new Date() });
     }
     await order.save();
+
+    // Auto-post accounting entry (fire-and-forget — never blocks payment recording)
+    autoPostOrder(order._id, order.restaurant).catch((err) =>
+      console.error('[Accounting] autoPostOrder failed for order', order._id, err.message)
+    );
 
     const io = req.app.get('io');
     if (io) {
