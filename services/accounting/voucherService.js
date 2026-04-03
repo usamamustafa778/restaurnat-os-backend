@@ -44,6 +44,12 @@ async function postVoucher(voucherId) {
     autoPosted:    voucher.autoPosted,
   }));
 
+  // Debug: log ALL journal entries about to be inserted
+  console.log(`[PostVoucher] ${voucher.voucherNumber}: inserting ${journalEntries.length} journal entries:`);
+  journalEntries.forEach((e, i) => {
+    console.log(`  [${i}] accountId=${e.accountId} | accountName=${e.accountName} | partyId=${e.partyId || 'none'} | partyName=${e.partyName || 'none'} | dr=${e.debit} | cr=${e.credit}`);
+  });
+
   await JournalEntry.insertMany(journalEntries);
   await Voucher.findByIdAndUpdate(voucherId, { status: 'posted' });
 }
@@ -78,6 +84,13 @@ async function createVoucher({ tenantId, type, date, referenceNo, notes, lines, 
   const accountMap = Object.fromEntries(accounts.map((a) => [a._id.toString(), a.name]));
   const partyMap   = Object.fromEntries(parties.map( (p) => [p._id.toString(), p.name]));
 
+  // Debug: log every incoming line before enrichment
+  console.log(`\n[CreateVoucher] Incoming lines (${lines.length}):`);
+  lines.forEach((l, i) => {
+    console.log(`  [${i}] accountId=${l.accountId} | partyId=${l.partyId || 'none'} | dr=${l.debit || 0} | cr=${l.credit || 0}`);
+  });
+  console.log(`[CreateVoucher] accountMap keys: ${Object.keys(accountMap).join(', ')}`);
+
   const enrichedLines = lines.map((l, i) => ({
     ...l,
     debit:       Number(l.debit)  || 0,
@@ -86,6 +99,12 @@ async function createVoucher({ tenantId, type, date, referenceNo, notes, lines, 
     partyName:   partyMap[l.partyId?.toString()]   || l.partyName   || '',
     sequence:    i,
   }));
+
+  // Debug: log every enriched line going into the voucher
+  console.log(`[CreateVoucher] Enriched lines:`);
+  enrichedLines.forEach((l, i) => {
+    console.log(`  [${i}] accountId=${l.accountId} | accountName=${l.accountName} | partyId=${l.partyId || 'none'} | partyName=${l.partyName || 'none'} | dr=${l.debit} | cr=${l.credit}`);
+  });
 
   const voucher = await Voucher.create({
     tenantId, type, voucherNumber, date, referenceNo, notes,

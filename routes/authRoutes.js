@@ -11,6 +11,18 @@ const jwt = require('jsonwebtoken');
 
 const router = express.Router();
 
+/**
+ * When SMTP fails or is unset, expose OTP in JSON for local dev (NODE_ENV !== production).
+ * AUTH_DEV_OTP_RESPONSE=0 disables everywhere; AUTH_DEV_OTP_RESPONSE=1 enables in production (insecure).
+ */
+function maybeDevOtpInAuthResponse(sent, otp) {
+  if (sent) return {};
+  if (process.env.AUTH_DEV_OTP_RESPONSE === '0') return {};
+  const isProd = process.env.NODE_ENV === 'production';
+  if (isProd && process.env.AUTH_DEV_OTP_RESPONSE !== '1') return {};
+  return { devOtp: otp };
+}
+
 // @route   POST /api/auth/register
 // @desc    Register a new user (primarily for development; production should use super admin flows)
 // @access  Public
@@ -119,11 +131,14 @@ router.post('/login', async (req, res, next) => {
       const { sent, error: emailError } = await sendOtpEmail(user.email, otp, 'Login');
       if (!sent) {
         console.warn('Verification email (login) not sent:', emailError || 'unknown error');
+        console.log(`[auth] Login verification OTP for ${user.email}:`, otp);
       }
 
-      return res
-        .status(403)
-        .json({ message: 'EMAIL_NOT_VERIFIED', pendingVerification: true });
+      return res.status(403).json({
+        message: 'EMAIL_NOT_VERIFIED',
+        pendingVerification: true,
+        ...maybeDevOtpInAuthResponse(sent, otp),
+      });
     }
 
     // Resolve restaurant to expose tenant slug (subdomain) for dashboard routing
@@ -423,6 +438,51 @@ router.post('/verify-email', async (req, res, next) => {
         defaultBranchId,
         allowedBranchIds,
       },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @route   POST /api/auth/resend-verification
+// @desc    Resend email verification OTP (requires password); for dashboard login flow
+// @access  Public
+router.post('/resend-verification', async (req, res, next) => {
+  try {
+    const { email, password } = req.body || {};
+    if (!email || !password) {
+      return res.status(400).json({ message: 'Email and password are required' });
+    }
+
+    const user = await User.findOne({ email: email.toLowerCase().trim() });
+    if (!user || !user.password) {
+      return res.status(401).json({ message: 'Invalid credentials' });
+    }
+
+    const isMatch = await user.matchPassword(password);
+    if (!isMatch) {
+      return res.status(401).json({ message: 'Invalid credentials' });
+    }
+
+    if (user.emailVerified) {
+      return res.status(400).json({ message: 'Email is already verified' });
+    }
+
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    user.emailVerificationOtp = otp;
+    user.emailVerificationOtpExpires = new Date(Date.now() + 10 * 60 * 1000);
+    await user.save();
+
+    const { sent, error: emailError } = await sendOtpEmail(user.email, otp, 'Login');
+    if (!sent) {
+      console.warn('Verification email (resend) not sent:', emailError || 'unknown error');
+      console.log(`[auth] Resend verification OTP for ${user.email}:`, otp);
+    }
+
+    res.json({
+      message: 'Verification code sent',
+      pendingVerification: true,
+      ...maybeDevOtpInAuthResponse(sent, otp),
     });
   } catch (error) {
     next(error);

@@ -14,13 +14,21 @@ const connectDB = async (mongoUri) => {
     // One-time: drop old Table index (tableNumber) from previous schema so new schema (name + isAvailable) works
     const tablesCol = conn.connection.db?.collection('tables');
     if (tablesCol) {
-      tablesCol.dropIndex('restaurant_1_branch_1_tableNumber_1').catch(() => {});
+      try {
+        await tablesCol.dropIndex('restaurant_1_branch_1_tableNumber_1');
+      } catch (e) {
+        if (e.code !== 26 && e.code !== 27) throw e;
+      }
     }
 
     // One-time: drop global unique index on orders.orderNumber so compound (restaurant, branch, orderNumber) is used
     const ordersCol = conn.connection.db?.collection('orders');
     if (ordersCol) {
-      ordersCol.dropIndex('orderNumber_1').catch(() => {});
+      try {
+        await ordersCol.dropIndex('orderNumber_1');
+      } catch (e) {
+        if (e.code !== 26 && e.code !== 27) throw e;
+      }
     }
 
     // Ensure category uniqueness is per (restaurant + branch + name), not per (restaurant + name) or (name) only

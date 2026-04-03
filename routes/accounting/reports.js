@@ -33,23 +33,27 @@ router.get('/ledger', async (req, res) => {
     if (!restaurant) return;
     const tenantId = restaurant._id;
 
-    const { accountId, partyId, dateFrom, dateTo } = req.query;
-    if (!accountId) return res.status(400).json({ message: 'accountId is required' });
+    const { accountId, partyId, dateFrom, dateTo, limit } = req.query;
+    if (!accountId && !partyId) {
+      return res.status(400).json({ message: 'accountId or partyId is required' });
+    }
     if (!dateFrom || !dateTo) return res.status(400).json({ message: 'dateFrom and dateTo are required' });
 
     const dateStart = new Date(dateFrom); dateStart.setHours(0, 0, 0, 0);
     const dateEnd   = new Date(dateTo);   dateEnd.setHours(23, 59, 59, 999);
 
-    const partyMatch = partyId ? { partyId: new mongoose.Types.ObjectId(partyId) } : {};
+    const match = {
+      tenantId: new mongoose.Types.ObjectId(tenantId),
+      ...(accountId ? { accountId: new mongoose.Types.ObjectId(accountId) } : {}),
+      ...(partyId ? { partyId: new mongoose.Types.ObjectId(partyId) } : {}),
+    };
 
     // Opening balance — all entries strictly before dateFrom
     const openingAgg = await JournalEntry.aggregate([
       {
         $match: {
-          tenantId:  new mongoose.Types.ObjectId(tenantId),
-          accountId: new mongoose.Types.ObjectId(accountId),
+          ...match,
           date:      { $lt: dateStart },
-          ...partyMatch,
         },
       },
       {
@@ -64,28 +68,40 @@ router.get('/ledger', async (req, res) => {
     const openingBalance = (openingAgg[0]?.totalDebit || 0) - (openingAgg[0]?.totalCredit || 0);
 
     // Period entries with running totals via $setWindowFields (MongoDB 5.0+)
+    const windowStage = accountId
+      ? {
+          $setWindowFields: {
+            partitionBy: '$accountId',
+            sortBy:      { date: 1, createdAt: 1 },
+            output: {
+              runningDebit:  { $sum: '$debit',  window: { documents: ['unbounded', 'current'] } },
+              runningCredit: { $sum: '$credit', window: { documents: ['unbounded', 'current'] } },
+            },
+          },
+        }
+      : {
+          $setWindowFields: {
+            sortBy:      { date: 1, createdAt: 1 },
+            output: {
+              runningDebit:  { $sum: '$debit',  window: { documents: ['unbounded', 'current'] } },
+              runningCredit: { $sum: '$credit', window: { documents: ['unbounded', 'current'] } },
+            },
+          },
+        };
+
     const entries = await JournalEntry.aggregate([
       {
         $match: {
-          tenantId:  new mongoose.Types.ObjectId(tenantId),
-          accountId: new mongoose.Types.ObjectId(accountId),
+          ...match,
           date:      { $gte: dateStart, $lte: dateEnd },
-          ...partyMatch,
         },
       },
       { $sort: { date: 1, createdAt: 1 } },
-      {
-        $setWindowFields: {
-          partitionBy: '$accountId',
-          sortBy:      { date: 1, createdAt: 1 },
-          output: {
-            runningDebit:  { $sum: '$debit',  window: { documents: ['unbounded', 'current'] } },
-            runningCredit: { $sum: '$credit', window: { documents: ['unbounded', 'current'] } },
-          },
-        },
-      },
+      windowStage,
       {
         $project: {
+          accountId:     1,
+          partyId:       1,
           date:          1,
           voucherNumber: 1,
           voucherType:   1,
@@ -100,14 +116,16 @@ router.get('/ledger', async (req, res) => {
       },
     ]);
 
+    const limitedEntries = Number(limit) > 0 ? entries.slice(-Number(limit)) : entries;
+
     // Offset every row's running balance by the opening balance
-    const entriesWithBalance = entries.map((e) => ({
+    const entriesWithBalance = limitedEntries.map((e) => ({
       ...e,
       balance: openingBalance + e.balance,
     }));
 
-    const closingBalance = entriesWithBalance.length > 0
-      ? entriesWithBalance[entriesWithBalance.length - 1].balance
+    const closingBalance = entries.length > 0
+      ? openingBalance + entries[entries.length - 1].balance
       : openingBalance;
 
     return res.json({ openingBalance, entries: entriesWithBalance, closingBalance });
@@ -332,11 +350,16 @@ router.get('/profit-loss', async (req, res) => {
     const expenses = enriched.filter((a) => a.type === 'expense');
 
     // Step 4: Totals
-    const grossRevenue   = revenue.reduce((s, a)  => s + a.net, 0);
-    const totalCOGS      = cogs.reduce((s, a)     => s + a.net, 0);
-    const grossProfit    = grossRevenue - totalCOGS;
-    const totalExpenses  = expenses.reduce((s, a) => s + a.net, 0);
-    const netProfit      = grossProfit - totalExpenses;
+    const grossRevenue     = revenue.reduce((s, a)  => s + a.net, 0);
+    const totalCOGSRaw     = cogs.reduce((s, a)     => s + a.net, 0);
+    const totalExpensesRaw = expenses.reduce((s, a) => s + a.net, 0);
+
+    // Ensure COGS / expenses aggregate as positive amounts; only subtract in final calc.
+    const totalCOGS     = Math.abs(totalCOGSRaw);
+    const totalExpenses = Math.abs(totalExpensesRaw);
+
+    const grossProfit = grossRevenue - totalCOGS;
+    const netProfit   = grossProfit - totalExpenses;
 
     return res.json({
       dateFrom, dateTo,

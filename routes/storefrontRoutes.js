@@ -387,10 +387,21 @@ router.get(
       }
 
       const categoryQuery = { restaurant: restaurant._id, isActive: true };
-      const menuQuery = { restaurant: restaurant._id, available: true, showOnWebsite: true };
+      // Use $ne: false so items created before the showOnWebsite field was added (field missing/null)
+      // are treated as visible — matching the schema's default: true intent.
+      const menuQuery = { restaurant: restaurant._id, available: true, showOnWebsite: { $ne: false } };
       if (selectedBranchId) {
-        categoryQuery.branch = selectedBranchId;
-        menuQuery.branch = selectedBranchId;
+        // Include items scoped to this branch AND items with branch:null (shared across all branches)
+        categoryQuery.$or = [
+          { branch: selectedBranchId },
+          { branch: null },
+          { branch: { $exists: false } },
+        ];
+        menuQuery.$or = [
+          { branch: selectedBranchId },
+          { branch: null },
+          { branch: { $exists: false } },
+        ];
       }
 
       const [categories, allItems, inventoryItems, branchForWebsite] = await Promise.all([
@@ -453,9 +464,15 @@ router.get(
           _id: { $in: sectionItemIds },
           restaurant: restaurant._id,
           available: true,
-          showOnWebsite: true,
+          showOnWebsite: { $ne: false },
         };
-        if (selectedBranchId) sectionItemQuery.branch = selectedBranchId;
+        if (selectedBranchId) {
+          sectionItemQuery.$or = [
+            { branch: selectedBranchId },
+            { branch: null },
+            { branch: { $exists: false } },
+          ];
+        }
 
         const sectionItems = await MenuItem.find(sectionItemQuery).populate('category');
         websiteSections.push({
@@ -568,7 +585,7 @@ router.get(
       ]);
 
       const publicDeals = deals
-        .filter((d) => d.showOnWebsite)
+        .filter((d) => d.showOnWebsite !== false)
         .map((d) => ({
           id: d._id.toString(),
           name: d.name,

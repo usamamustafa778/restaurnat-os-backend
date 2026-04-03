@@ -31,6 +31,10 @@ const voucherSchema = new mongoose.Schema(
     autoPosted: { type: Boolean, default: false },
     sourceId: { type: mongoose.Schema.Types.ObjectId, default: null },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    isReversal: { type: Boolean, default: false },
+    reversalOf: { type: mongoose.Schema.Types.ObjectId, ref: 'Voucher', default: null },
+    isReversed: { type: Boolean, default: false },
+    reversedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'Voucher', default: null },
     lines: [voucherLineSchema],
   },
   { timestamps: true }

@@ -293,7 +293,7 @@ router.post('/orders', async (req, res, next) => {
       if (quantity <= 0) throw new Error('Quantity must be greater than zero');
       const lineTotal = menu.price * quantity;
       subtotal += lineTotal;
-      return { menuItem: menu._id, name: menu.name, quantity, unitPrice: menu.price, lineTotal };
+      return { menuItem: menu._id, name: menu.name, quantity, unitPrice: menu.price, lineTotal, note: (i.note || '').trim() || undefined };
     });
 
     // Build order items for deal (combo) expansions — items at full price, discount tracked in appliedDeals

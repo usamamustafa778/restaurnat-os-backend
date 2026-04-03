@@ -97,6 +97,10 @@ const getRestaurantIdForRequest = (req) => {
 
 const getBranchIdForRequest = (req) => req.branch?._id || null;
 
+/** Same as resolveBranch / getBranchContext owner: can use any branch in the tenant. */
+const isTenantFullBranchAccess = (role) =>
+  role === 'super_admin' || role === 'restaurant_admin' || role === 'admin';
+
 const mapBranch = (branch) => ({
   id: branch._id.toString(),
   name: branch.name,
@@ -457,7 +461,7 @@ router.get('/branches', async (req, res, next) => {
 router.get('/branches/deleted', async (req, res, next) => {
   try {
     const restaurantId = getRestaurantIdForRequest(req);
-    if (req.user.role !== 'super_admin' && req.user.role !== 'restaurant_admin') {
+    if (!isTenantFullBranchAccess(req.user.role)) {
       return res.status(403).json({ message: 'Only restaurant owner can view deleted branches' });
     }
     const cutoff = new Date(Date.now() - 48 * 60 * 60 * 1000);
@@ -480,7 +484,7 @@ router.get('/branches/deleted', async (req, res, next) => {
 router.post('/branches', async (req, res, next) => {
   try {
     const restaurantId = getRestaurantIdForRequest(req);
-    if (req.user.role !== 'super_admin' && req.user.role !== 'restaurant_admin') {
+    if (!isTenantFullBranchAccess(req.user.role)) {
       return res.status(403).json({ message: 'Only restaurant owner can create branches' });
     }
     const { name, code, address, contactPhone, contactEmail, openingHours, status, sortOrder, businessDayCutoffHour } = req.body;
@@ -530,7 +534,11 @@ router.get('/branches/:id', async (req, res, next) => {
     if (!branch) {
       return res.status(404).json({ message: 'Branch not found' });
     }
-    if (req.user.role !== 'super_admin' && req.user.role !== 'restaurant_admin' && req.user.allowedBranchIds?.length && !req.user.allowedBranchIds.includes(branch._id.toString())) {
+    if (
+      !isTenantFullBranchAccess(req.user.role) &&
+      req.user.allowedBranchIds?.length &&
+      !req.user.allowedBranchIds.includes(branch._id.toString())
+    ) {
       return res.status(403).json({ message: 'Access denied to this branch' });
     }
     res.json(mapBranch(branch));
@@ -549,7 +557,10 @@ router.put('/branches/:id', async (req, res, next) => {
     if (!branch) {
       return res.status(404).json({ message: 'Branch not found' });
     }
-    if (req.user.role !== 'super_admin' && req.user.role !== 'restaurant_admin' && (!req.user.allowedBranchIds || !req.user.allowedBranchIds.includes(branch._id.toString()))) {
+    if (
+      !isTenantFullBranchAccess(req.user.role) &&
+      (!req.user.allowedBranchIds || !req.user.allowedBranchIds.includes(branch._id.toString()))
+    ) {
       return res.status(403).json({ message: 'Access denied to this branch' });
     }
     const { name, code, address, contactPhone, contactEmail, openingHours, status, sortOrder, showTablePos, showWaiterPos, showCustomerPos, businessDayCutoffHour } = req.body;
@@ -594,7 +605,7 @@ router.put('/branches/:id', async (req, res, next) => {
 router.delete('/branches/:id', async (req, res, next) => {
   try {
     const restaurantId = getRestaurantIdForRequest(req);
-    if (req.user.role !== 'super_admin' && req.user.role !== 'restaurant_admin') {
+    if (!isTenantFullBranchAccess(req.user.role)) {
       return res.status(403).json({ message: 'Only restaurant owner can delete branches' });
     }
     const branch = await Branch.findOne({ _id: req.params.id, restaurant: restaurantId });
@@ -620,7 +631,7 @@ router.delete('/branches/:id', async (req, res, next) => {
 router.post('/branches/:id/restore', async (req, res, next) => {
   try {
     const restaurantId = getRestaurantIdForRequest(req);
-    if (req.user.role !== 'super_admin' && req.user.role !== 'restaurant_admin') {
+    if (!isTenantFullBranchAccess(req.user.role)) {
       return res.status(403).json({ message: 'Only restaurant owner can restore branches' });
     }
     const branch = await Branch.findOne({ _id: req.params.id, restaurant: restaurantId });
@@ -657,8 +668,7 @@ router.put('/branches/:id/delivery-zones', async (req, res, next) => {
       return res.status(404).json({ message: 'Branch not found' });
     }
     if (
-      req.user.role !== 'super_admin' &&
-      req.user.role !== 'restaurant_admin' &&
+      !isTenantFullBranchAccess(req.user.role) &&
       (!req.user.allowedBranchIds || !req.user.allowedBranchIds.includes(branch._id.toString()))
     ) {
       return res.status(403).json({ message: 'Access denied to this branch' });
@@ -809,6 +819,7 @@ const mapOrder = (order) => {
       qty: i.quantity,
       unitPrice: i.unitPrice,
       lineTotal: i.lineTotal,
+      note: i.note || undefined,
     })),
     type:
       order.orderType === 'DINE_IN'
@@ -1136,6 +1147,7 @@ router.put('/orders/:id', async (req, res, next) => {
           quantity: qty,
           unitPrice,
           lineTotal,
+          note: (i.note || '').trim() || undefined,
         });
       }
       const discount = Math.max(0, Number(discountAmount) ?? order.discountAmount ?? 0);
