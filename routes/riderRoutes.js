@@ -251,9 +251,19 @@ router.get('/menu', async (req, res, next) => {
       }
     }
 
+    const activeCategoryIdSet = new Set(
+      categories.filter((c) => c.isActive !== false).map((c) => c._id.toString()),
+    );
+
     const itemsPayload = [];
     for (const item of rawItems) {
       if (!item.available) continue;
+
+      const catId = item.category ? item.category.toString() : null;
+      if (catId && !activeCategoryIdSet.has(catId)) continue;
+
+      // Legacy (no branch): items that require per-branch enablement are not sellable here
+      if (!branchId && item.availableAtAllBranches === false) continue;
 
       const { sufficient } = checkInventorySufficiency(item, inventoryMap);
 
@@ -288,12 +298,14 @@ router.get('/menu', async (req, res, next) => {
       });
     }
 
-    const categoriesPayload = categories.map((c) => ({
-      id: c._id.toString(),
-      _id: c._id.toString(),
-      name: c.name,
-      description: c.description || '',
-    }));
+    const categoriesPayload = categories
+      .filter((c) => c.isActive !== false)
+      .map((c) => ({
+        id: c._id.toString(),
+        _id: c._id.toString(),
+        name: c.name,
+        description: c.description || '',
+      }));
 
     res.json({ categories: categoriesPayload, items: itemsPayload });
   } catch (error) {
