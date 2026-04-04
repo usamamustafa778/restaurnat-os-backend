@@ -24,6 +24,7 @@ const { getOrderRooms } = require('../utils/socketRooms');
 const { normalizeEmail, normalizePhone } = require('../utils/storefrontIdentifiers');
 const escapeRegex = require('../utils/escapeRegex');
 const { sanitizeDeliveryLocationsInput } = require('../utils/deliveryLocations');
+const { checkInventorySufficiency } = require('../utils/checkInventorySufficiency');
 const { autoPostOrder } = require('../services/accounting/autoPost');
 
 const router = express.Router();
@@ -864,31 +865,6 @@ const mapOrder = (order) => {
     daySessionId: order.daySession ? order.daySession.toString() : null,
   };
 };
-
-/**
- * Check whether a menu item has sufficient inventory for at least one sale.
- * Returns { sufficient: boolean, insufficientItems: string[] }
- */
-function checkInventorySufficiency(menuItem, inventoryMap) {
-  const insufficientItems = [];
-  if (!menuItem.inventoryConsumptions || menuItem.inventoryConsumptions.length === 0) {
-    return { sufficient: true, insufficientItems };
-  }
-  for (const consumption of menuItem.inventoryConsumptions) {
-    const invId = consumption.inventoryItem ? consumption.inventoryItem.toString() : null;
-    if (!invId) continue;
-    const inv = inventoryMap.get(invId);
-    if (!inv) {
-      insufficientItems.push('Unknown ingredient');
-      continue;
-    }
-    const needed = consumption.quantity || 0;
-    if (needed > 0 && inv.currentStock < needed) {
-      insufficientItems.push(inv.name);
-    }
-  }
-  return { sufficient: insufficientItems.length === 0, insufficientItems };
-}
 
 // @route   GET /api/admin/menu
 // @desc    Get all categories and menu items for a restaurant.

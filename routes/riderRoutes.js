@@ -7,7 +7,11 @@ const Branch = require('../models/Branch');
 const Customer = require('../models/Customer');
 const Category = require('../models/Category');
 const MenuItem = require('../models/MenuItem');
-const { protect, requireRole } = require('../middleware/authMiddleware');
+const InventoryItem = require('../models/InventoryItem');
+const BranchInventory = require('../models/BranchInventory');
+const BranchMenuItem = require('../models/BranchMenuItem');
+const { checkInventorySufficiency } = require('../utils/checkInventorySufficiency');
+const { protect, requireRole, resolveBranch } = require('../middleware/authMiddleware');
 const { getOrderRooms } = require('../utils/socketRooms');
 
 const router = express.Router();
@@ -40,6 +44,9 @@ router.use(async (req, res, next) => {
     next(error);
   }
 });
+
+// Same as admin routes: resolve req.branch from x-branch-id so inventory matches POS
+router.use(resolveBranch);
 
 const mapRiderOrder = (order) => ({
   id: order.orderNumber || order._id.toString(),
@@ -177,7 +184,7 @@ router.post('/customers', async (req, res, next) => {
 });
 
 // @route   GET /api/rider/menu
-// @desc    Get menu (categories + items) for rider to create delivery orders. No branch scope.
+// @desc    Menu for rider new orders — matches POS: branch-aware stock (inventorySufficient), optional ?branchId=
 // @access  delivery_rider
 router.get('/menu', async (req, res, next) => {
   try {
@@ -186,29 +193,106 @@ router.get('/menu', async (req, res, next) => {
       return res.status(400).json({ message: 'Restaurant context missing' });
     }
 
-    // Include both restaurant-level (branch null) and any branch-level menu so riders see full catalog
-    const [categories, items] = await Promise.all([
-      Category.find({ restaurant: restaurantId }).sort({ createdAt: 1 }),
-      MenuItem.find({ restaurant: restaurantId, available: true }),
-    ]);
+    // Match GET /api/admin/menu: prefer ?branchId=, else branch from resolveBranch (x-branch-id header)
+    let branchId = req.branch?._id || null;
+    if (req.query.branchId && req.query.branchId !== 'all') {
+      const branchDoc = await Branch.findOne({
+        _id: req.query.branchId,
+        restaurant: restaurantId,
+        isDeleted: { $ne: true },
+      }).select('_id');
+      if (branchDoc) branchId = branchDoc._id;
+    }
+
+    let categories;
+    let rawItems;
+    let inventoryItems;
+
+    if (branchId) {
+      const categoryQuery = { restaurant: restaurantId, branch: branchId };
+      const itemQuery = { restaurant: restaurantId, branch: branchId };
+      const inventoryQuery = { restaurant: restaurantId, branch: branchId };
+      [categories, rawItems, inventoryItems] = await Promise.all([
+        Category.find(categoryQuery).sort({ createdAt: 1 }),
+        MenuItem.find(itemQuery),
+        InventoryItem.find(inventoryQuery),
+      ]);
+    } else {
+      // Legacy: same broad catalog as before (no branch filter on items/categories)
+      [categories, rawItems, inventoryItems] = await Promise.all([
+        Category.find({ restaurant: restaurantId }).sort({ createdAt: 1 }),
+        MenuItem.find({ restaurant: restaurantId, available: true }),
+        InventoryItem.find({ restaurant: restaurantId }),
+      ]);
+    }
+
+    const inventoryMap = new Map();
+    if (branchId) {
+      const branchRows = await BranchInventory.find({ branch: branchId }).lean();
+      const branchStockByInv = new Map();
+      for (const row of branchRows) {
+        branchStockByInv.set(row.inventoryItem.toString(), row.currentStock);
+      }
+      for (const inv of inventoryItems) {
+        const currentStock = branchStockByInv.get(inv._id.toString()) ?? 0;
+        inventoryMap.set(inv._id.toString(), { name: inv.name, currentStock });
+      }
+    } else {
+      for (const inv of inventoryItems) {
+        inventoryMap.set(inv._id.toString(), inv);
+      }
+    }
+
+    let overrideMap = new Map();
+    if (branchId) {
+      const overrides = await BranchMenuItem.find({ branch: branchId }).lean();
+      for (const o of overrides) {
+        overrideMap.set(o.menuItem.toString(), o);
+      }
+    }
+
+    const itemsPayload = [];
+    for (const item of rawItems) {
+      if (!item.available) continue;
+
+      const { sufficient } = checkInventorySufficiency(item, inventoryMap);
+
+      let finalAvailable = item.available;
+      let finalPrice = item.price;
+
+      if (branchId) {
+        const override = overrideMap.get(item._id.toString());
+        let branchAvailable = item.availableAtAllBranches !== false ? item.available : false;
+        if (override) {
+          branchAvailable = override.available;
+        }
+        finalAvailable = branchAvailable;
+        if (override?.priceOverride != null) {
+          finalPrice = override.priceOverride;
+        }
+      }
+
+      if (!finalAvailable) continue;
+
+      itemsPayload.push({
+        id: item._id.toString(),
+        _id: item._id.toString(),
+        name: item.name,
+        price: item.price,
+        finalPrice,
+        categoryId: item.category ? item.category.toString() : null,
+        available: item.available,
+        finalAvailable,
+        imageUrl: item.imageUrl || '',
+        inventorySufficient: sufficient,
+      });
+    }
 
     const categoriesPayload = categories.map((c) => ({
       id: c._id.toString(),
       _id: c._id.toString(),
       name: c.name,
       description: c.description || '',
-    }));
-
-    const itemsPayload = items.map((item) => ({
-      id: item._id.toString(),
-      _id: item._id.toString(),
-      name: item.name,
-      price: item.price,
-      finalPrice: item.price,
-      categoryId: item.category ? item.category.toString() : null,
-      available: item.available,
-      finalAvailable: item.available,
-      imageUrl: item.imageUrl || '',
     }));
 
     res.json({ categories: categoriesPayload, items: itemsPayload });
