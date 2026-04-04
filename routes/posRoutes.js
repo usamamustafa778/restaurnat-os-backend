@@ -1905,12 +1905,13 @@ router.get('/day-session/:sessionId/orders', async (req, res, next) => {
       return res.status(404).json({ message: 'Day session not found' });
     }
 
-    // OPEN = live business day: include every session that started today (UTC day) so orders
-    // from earlier closed sessions appear here. CLOSED = historical view for that session only.
-    let sessionIdsForOrders =
-      session.status === 'OPEN'
-        ? await getRelatedSessionIdsForOpenDayReport(session, restaurantId)
-        : [session._id];
+    // Default: only orders linked to this session document (drill-down from session list).
+    // Optional ?dayScope=all: merge all same-calendar-day sessions for this branch (full-day report,
+    // end-day picker, etc.). Any session from that day can be used as the URL anchor.
+    const dayScopeAll = String(req.query.dayScope || '') === 'all';
+    const sessionIdsForOrders = dayScopeAll
+      ? await getRelatedSessionIdsForOpenDayReport(session, restaurantId)
+      : [session._id];
 
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
     res.set('Pragma', 'no-cache');
