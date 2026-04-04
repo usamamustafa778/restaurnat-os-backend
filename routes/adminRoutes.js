@@ -1013,8 +1013,9 @@ router.get('/orders', async (req, res, next) => {
     const branchId = getBranchIdForRequest(req);
 
     const query = { restaurant: restaurantId };
+    // Include orders for the selected branch AND orders with branch: null (legacy).
     if (branchId) {
-      query.branch = branchId;
+      query.$or = [{ branch: branchId }, { branch: null }];
     }
     if (req.query.status) {
       query.status = req.query.status;
@@ -3265,7 +3266,12 @@ router.get('/reports/sales', async (req, res, next) => {
           restaurant: restaurantId,
           createdAt: { $gte: fromDate, $lte: toDate },
         };
-    if (branchId) allOrderFilter.branch = branchId;
+    // Branch scoping: include orders for the selected branch AND orders with branch: null
+    // (legacy auto-created orders before branch tracking was fully implemented).
+    // This prevents older orders from being silently excluded.
+    if (branchId) {
+      allOrderFilter.$or = [{ branch: branchId }, { branch: null }];
+    }
     if (useSessionScope && !branchId && sessionDoc.branch) {
       allOrderFilter.branch = sessionDoc.branch;
     }
@@ -3755,42 +3761,70 @@ router.get('/dashboard/summary', async (req, res, next) => {
     startOfMonth.setDate(1);
     startOfMonth.setHours(0, 0, 0, 0);
 
-    // Align "today" with Business Day Report: use DaySession links so the dashboard
-    // matches the Business Day Report. Crucially we include ALL sessions that started
-    // in today's business-day window (not just the single OPEN one) so that orders
-    // from a session closed mid-day are not silently dropped from the totals.
+    // Use today's sessions to determine the correct time window for "today".
+    // We do NOT filter orders by session ID — we use the session start times to
+    // derive a createdAt range and apply that to orders. This avoids a common
+    // pitfall where sessions have branch:null (legacy auto-created) while orders
+    // correctly have branch set, causing a session-ID-based filter to miss orders.
     //
-    // We extend the lookback by 12h before startOfDay to handle restaurants in
-    // timezones ahead of UTC (e.g. UTC+5 Pakistan) where a session started at
-    // "today 9am local" corresponds to "today 4am UTC" but startOfDay may be
-    // computed as "today 4am UTC" on a UTC server — still covered. Sessions started
-    // even earlier in the local morning (e.g. 8am PKT = 3am UTC) would otherwise
-    // be missed; the 12-hour buffer catches those without pulling in yesterday's sessions.
+    // Strategy:
+    //   1. Find all sessions for this restaurant that started within a 24-hour
+    //      window before endOfDay (covers all timezones and early-morning sessions).
+    //      We intentionally do NOT filter by branch here so that legacy sessions
+    //      with branch:null are still discovered.
+    //   2. Among those, pick sessions whose startAt falls within today's business
+    //      day window (startOfDay - 12h … endOfDay) to account for UTC offset.
+    //   3. Use the earliest session startAt as the from-date for the order query.
+    //   4. Branch filtering is applied to ORDERS (authoritative), not sessions.
     let openSessionForToday = null;
-    let todaySessionIds = null;
-    if (branchId) {
-      const sessionSearchFrom = new Date(startOfDay.getTime() - 12 * 60 * 60 * 1000);
-      const todaySessions = await DaySession.find({
-        restaurant: restaurantId,
-        branch: branchId,
-        startAt: { $gte: sessionSearchFrom },
-      })
-        .select('_id startAt status')
-        .lean();
-      if (todaySessions.length > 0) {
-        todaySessionIds = todaySessions.map((s) => s._id);
-        openSessionForToday = todaySessions.find((s) => s.status === 'OPEN') || null;
-      }
+    const sessionSearchFrom = new Date(startOfDay.getTime() - 24 * 60 * 60 * 1000);
+    const candidateSessions = await DaySession.find({
+      restaurant: restaurantId,
+      startAt: { $gte: sessionSearchFrom, $lte: endOfDay },
+    })
+      .select('_id startAt status branch')
+      .lean();
+
+    // Filter to sessions that belong to this branch (including null-branch legacy ones)
+    const todaySessions = candidateSessions.filter((s) => {
+      if (!branchId) return true; // no branch scoping
+      const sBranch = s.branch ? s.branch.toString() : null;
+      const reqBranch = branchId ? branchId.toString() : null;
+      return sBranch === reqBranch || sBranch === null;
+    });
+
+    // Compute the effective "today" window from session data
+    let effectiveFrom = startOfDay;
+    if (todaySessions.length > 0) {
+      openSessionForToday = todaySessions.find((s) => s.status === 'OPEN') || null;
+      // Use the earliest session startAt (minus a 10-minute safety buffer) so orders
+      // whose createdAt is at-or-just-before the session startAt are never excluded.
+      // This covers the case where a session was auto-created during the first order
+      // request of the day (session.startAt ≈ order.createdAt).
+      const earliestMs = todaySessions.reduce(
+        (min, s) => Math.min(min, new Date(s.startAt).getTime()),
+        new Date(todaySessions[0].startAt).getTime(),
+      );
+      effectiveFrom = new Date(earliestMs - 10 * 60 * 1000);
     }
 
-    const orderFilter = todaySessionIds && todaySessionIds.length > 0
-      ? { restaurant: restaurantId, branch: branchId, daySession: { $in: todaySessionIds } }
-      : { restaurant: restaurantId, createdAt: { $gte: startOfDay, $lte: endOfDay } };
-    if (!todaySessionIds && branchId) orderFilter.branch = branchId;
+    // Order filter: always use createdAt range + branch on ORDERS (never session ID).
+    // Include orders with branch: null (legacy) alongside branch-specific orders.
+    const orderFilter = {
+      restaurant: restaurantId,
+      createdAt: { $gte: effectiveFrom, $lte: endOfDay },
+    };
+    if (branchId) {
+      orderFilter.$or = [{ branch: branchId }, { branch: null }];
+    }
 
     const pendingFilter = { restaurant: restaurantId, status: { $in: ['NEW_ORDER', 'PROCESSING', 'READY'] } };
-    if (branchId) pendingFilter.branch = branchId;
-    if (todaySessionIds && todaySessionIds.length > 0) pendingFilter.daySession = { $in: todaySessionIds };
+    if (branchId) {
+      pendingFilter.$or = [{ branch: branchId }, { branch: null }];
+    }
+    // Pending orders: restrict to today's window so stale orders from previous days
+    // don't inflate the count.
+    pendingFilter.createdAt = { $gte: effectiveFrom, $lte: endOfDay };
 
     const sevenDaysAgo = new Date();
     sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);

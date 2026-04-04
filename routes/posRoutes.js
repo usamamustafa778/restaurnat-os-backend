@@ -1668,10 +1668,15 @@ router.get('/day-session/list', async (req, res, next) => {
     const limit = parseInt(req.query.limit) || 20;
     const offset = parseInt(req.query.offset) || 0;
 
-    // When branchId is provided filter to that branch only;
-    // when null/omitted (All branches view) return sessions for all branches.
+    // When branchId is provided, return sessions for that branch AND sessions with
+    // branch: null (legacy auto-created sessions). This ensures older sessions that
+    // were created before branch tracking was fully implemented still appear in the
+    // list so they are included when computing "today's" time window for reports.
+    // For the "All branches" view (no branchId) we return every session.
     const filter = { restaurant: restaurantId };
-    if (branchId) filter.branch = branchId;
+    if (branchId) {
+      filter.$or = [{ branch: branchId }, { branch: null }];
+    }
 
     const [sessions, total] = await Promise.all([
       DaySession.find(filter)
