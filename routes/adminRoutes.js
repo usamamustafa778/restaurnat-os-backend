@@ -3759,13 +3759,21 @@ router.get('/dashboard/summary', async (req, res, next) => {
     // matches the Business Day Report. Crucially we include ALL sessions that started
     // in today's business-day window (not just the single OPEN one) so that orders
     // from a session closed mid-day are not silently dropped from the totals.
+    //
+    // We extend the lookback by 12h before startOfDay to handle restaurants in
+    // timezones ahead of UTC (e.g. UTC+5 Pakistan) where a session started at
+    // "today 9am local" corresponds to "today 4am UTC" but startOfDay may be
+    // computed as "today 4am UTC" on a UTC server — still covered. Sessions started
+    // even earlier in the local morning (e.g. 8am PKT = 3am UTC) would otherwise
+    // be missed; the 12-hour buffer catches those without pulling in yesterday's sessions.
     let openSessionForToday = null;
     let todaySessionIds = null;
     if (branchId) {
+      const sessionSearchFrom = new Date(startOfDay.getTime() - 12 * 60 * 60 * 1000);
       const todaySessions = await DaySession.find({
         restaurant: restaurantId,
         branch: branchId,
-        startAt: { $gte: startOfDay },
+        startAt: { $gte: sessionSearchFrom },
       })
         .select('_id startAt status')
         .lean();
