@@ -3975,7 +3975,7 @@ router.get('/dashboard/summary', async (req, res, next) => {
       }));
 
     res.json({
-      todayScope: todaySessionIds ? 'daySession' : 'cutoff',
+      todayScope: todaySessions.length > 0 ? 'daySession' : 'cutoff',
       daySessionId: openSessionForToday ? openSessionForToday._id.toString() : null,
       todaysRevenue,
       todaysOrdersCount,
