@@ -1524,8 +1524,14 @@ router.put('/orders/:id/assign-rider', async (req, res, next) => {
     order.assignedRiderId = rider._id;
     order.assignedRiderName = rider.name;
     order.assignedRiderPhone = rider.phone || '';
-    order.deliveryCharges = Math.max(0, Number(deliveryCharges) || 0);
-    order.grandTotal = order.total + order.deliveryCharges;
+    // Only set delivery fee when the client sends it explicitly (e.g. adjust at assign time).
+    // The orders UI usually sends only { riderId }; without this we would overwrite with 0.
+    if (Object.prototype.hasOwnProperty.call(req.body, 'deliveryCharges')) {
+      order.deliveryCharges = Math.max(0, Number(deliveryCharges) || 0);
+    }
+    order.grandTotal =
+      (order.total || 0) +
+      (order.orderType === 'DELIVERY' ? (order.deliveryCharges || 0) : 0);
     // Keep status unchanged (usually READY) so the assigned rider still has to collect from kitchen.
     // The rider "collect" action is what transitions to OUT_FOR_DELIVERY.
     await order.save();
