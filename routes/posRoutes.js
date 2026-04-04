@@ -109,6 +109,35 @@ async function getLastCompletedOrderAt({ restaurantId, sessionId }) {
   return last?.createdAt ? new Date(last.createdAt) : null;
 }
 
+/** UTC midnight … next UTC midnight for the calendar day of `d` (stable across server TZ). */
+function getUtcDayBounds(d) {
+  const x = new Date(d);
+  const start = new Date(Date.UTC(x.getUTCFullYear(), x.getUTCMonth(), x.getUTCDate(), 0, 0, 0, 0));
+  const end = new Date(start.getTime() + 24 * 60 * 60 * 1000);
+  return { start, end };
+}
+
+/**
+ * For an OPEN session, the "Business Day Report" should reflect all sales for today, not only
+ * orders linked to this session document. Earlier sessions (closed mid-day, then a new session
+ * started) still hold the day's orders on their own daySession ids.
+ */
+async function getRelatedSessionIdsForOpenDayReport(session, restaurantId) {
+  const { start: dayStart, end: dayEnd } = getUtcDayBounds(session.startAt);
+  const q = {
+    restaurant: restaurantId,
+    startAt: { $gte: dayStart, $lt: dayEnd },
+  };
+  if (session.branch) {
+    q.$or = [{ branch: session.branch }, { branch: null }];
+  } else {
+    q.branch = null;
+  }
+  const rows = await DaySession.find(q).select('_id').lean();
+  const ids = rows.map((r) => r._id);
+  return ids.length ? ids : [session._id];
+}
+
 // Returns the current OPEN session or null — never auto-creates.
 // Sessions must be started manually via POST /api/pos/day-session/start.
 async function getCurrentOpenSession(restaurantId, branch) {
@@ -1876,8 +1905,18 @@ router.get('/day-session/:sessionId/orders', async (req, res, next) => {
       return res.status(404).json({ message: 'Day session not found' });
     }
 
+    // OPEN = live business day: include every session that started today (UTC day) so orders
+    // from earlier closed sessions appear here. CLOSED = historical view for that session only.
+    let sessionIdsForOrders =
+      session.status === 'OPEN'
+        ? await getRelatedSessionIdsForOpenDayReport(session, restaurantId)
+        : [session._id];
+
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+    res.set('Pragma', 'no-cache');
+
     const orders = await Order.find({
-      daySession: sessionId,
+      daySession: { $in: sessionIdsForOrders },
       restaurant: restaurantId,
     })
       .sort({ createdAt: -1 })
@@ -1887,7 +1926,7 @@ router.get('/day-session/:sessionId/orders', async (req, res, next) => {
     const totalsAgg = await Order.aggregate([
       {
         $match: {
-          daySession: session._id,
+          daySession: { $in: sessionIdsForOrders },
           status: { $in: CLOSED_ORDER_STATUSES },
           ...PAID_ORDER_MATCH,
         },
