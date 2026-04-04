@@ -5,6 +5,7 @@ const MenuItem = require('../models/MenuItem');
 const BranchMenuItem = require('../models/BranchMenuItem');
 const Category = require('../models/Category');
 const InventoryItem = require('../models/InventoryItem');
+const BranchInventory = require('../models/BranchInventory');
 const Customer = require('../models/Customer');
 const Order = require('../models/Order');
 const StorefrontCustomer = require('../models/StorefrontCustomer');
@@ -391,13 +392,7 @@ router.get(
       // are treated as visible — matching the schema's default: true intent.
       const menuQuery = { restaurant: restaurant._id, available: true, showOnWebsite: { $ne: false } };
 
-      // Apply branch filter to item/category queries ONLY for multi-branch restaurants.
-      // For single-branch restaurants (activeBranches.length === 1), show ALL restaurant
-      // items regardless of their branch field — this ensures items created under a
-      // previously-active branch (now deactivated or reassigned) remain visible on the
-      // website. Branch filtering is meaningful only when multiple branches are active
-      // and the customer has selected one.
-      if (selectedBranchId && activeBranches.length > 1) {
+      if (selectedBranchId) {
         // Include items scoped to this branch AND items with branch:null (shared across all branches)
         categoryQuery.$or = [
           { branch: selectedBranchId },
@@ -411,19 +406,34 @@ router.get(
         ];
       }
 
-      const [categories, allItems, inventoryItems, branchForWebsite] = await Promise.all([
+      const [categories, allItems, inventoryItems, branchInventoryRows, branchForWebsite] = await Promise.all([
         Category.find(categoryQuery).sort({ createdAt: 1 }),
         MenuItem.find(menuQuery).populate('category'),
         InventoryItem.find({ restaurant: restaurant._id }),
+        selectedBranchId
+          ? BranchInventory.find({ branch: selectedBranchId }).lean()
+          : Promise.resolve([]),
         selectedBranchId
           ? Branch.findOne({ _id: selectedBranchId, restaurant: restaurant._id })
           : null,
       ]);
 
-      // Inventory sufficiency check
+      // Inventory sufficiency check.
+      // When a branch is selected, prefer branch-level stock (BranchInventory) over the
+      // main InventoryItem.currentStock. Restaurants that track stock per-branch keep
+      // their real quantities in BranchInventory; the main item stock may be 0 or stale.
+      const branchStockMap = new Map();
+      for (const row of branchInventoryRows) {
+        branchStockMap.set(row.inventoryItem.toString(), row.currentStock);
+      }
+
       const inventoryMap = new Map();
       for (const inv of inventoryItems) {
-        inventoryMap.set(inv._id.toString(), inv);
+        const id = inv._id.toString();
+        const currentStock = selectedBranchId && branchStockMap.has(id)
+          ? branchStockMap.get(id)
+          : inv.currentStock;
+        inventoryMap.set(id, { ...inv.toObject?.() ?? inv, currentStock });
       }
 
       function hasEnoughInventory(menuItem) {

@@ -125,6 +125,7 @@ app.use('/api', contactRoutes);
 app.use('/api/rider', riderRoutes);
 app.use('/api/storefront', storefrontRoutes);
 app.use('/api/accounting/setup',    accountingSetupRoutes);
+app.use('/api/accounting',          accountingSetupRoutes);   // exposes /api/accounting/sync-sales
 app.use('/api/accounting/accounts', accountingAccountsRoutes);
 app.use('/api/accounting/parties',  accountingPartiesRoutes);
 app.use('/api/accounting/vouchers', accountingVouchersRoutes);
