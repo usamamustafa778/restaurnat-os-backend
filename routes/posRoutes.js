@@ -109,25 +109,15 @@ async function getLastCompletedOrderAt({ restaurantId, sessionId }) {
   return last?.createdAt ? new Date(last.createdAt) : null;
 }
 
-// Returns existing OPEN session or auto-creates a new one (no manual start needed)
-async function getOrCreateCurrentSession(restaurantId, branch, userId) {
+// Returns the current OPEN session or null — never auto-creates.
+// Sessions must be started manually via POST /api/pos/day-session/start.
+async function getCurrentOpenSession(restaurantId, branch) {
   const branchId = branch ? branch._id : null;
   const cutoffHour = branch?.businessDayCutoffHour ?? 4;
-  let session = await DaySession.findOne({ restaurant: restaurantId, branch: branchId, status: 'OPEN' });
-  if (session) {
-    await closeSessionIfPastCutoff(session, cutoffHour, null);
-    if (session.status === 'CLOSED') session = null;
-  }
-  if (!session) {
-    session = await DaySession.create({
-      restaurant: restaurantId,
-      branch: branchId,
-      status: 'OPEN',
-      startAt: new Date(),
-      openedBy: userId || null,
-    });
-  }
-  return session;
+  const session = await DaySession.findOne({ restaurant: restaurantId, branch: branchId, status: 'OPEN' });
+  if (!session) return null;
+  await closeSessionIfPastCutoff(session, cutoffHour, null);
+  return session.status === 'CLOSED' ? null : session;
 }
 
 const router = express.Router();
@@ -476,7 +466,13 @@ router.post('/orders', async (req, res, next) => {
       }
     }
 
-    const session = await getOrCreateCurrentSession(req.restaurant._id, branch, req.user.id);
+    const session = await getCurrentOpenSession(req.restaurant._id, branch);
+    if (!session) {
+      return res.status(409).json({
+        message: 'No active business day session. Please start a session before placing orders.',
+        code: 'NO_ACTIVE_SESSION',
+      });
+    }
 
     // Auto-assign rider when a delivery_rider creates the order
     const isRiderCreated = req.user.role === 'delivery_rider' && orderType === 'DELIVERY';
@@ -1304,8 +1300,61 @@ router.get('/day-session/current', async (req, res, next) => {
   }
 });
 
+// @route   POST /api/pos/day-session/start
+// @desc    Manually open a new business-day session. Fails if one is already open.
+// @access  Restaurant Admin / Manager / Cashier (not order_taker / delivery_rider)
+router.post('/day-session/start', async (req, res, next) => {
+  try {
+    const restaurantId = req.restaurant._id;
+    const branchId = req.body.branchId || req.headers['x-branch-id'] || null;
+    const { branch, cutoffHour, invalid } = await resolveBranchAndCutoff(restaurantId, branchId);
+    if (invalid) return res.status(400).json({ message: 'Invalid branchId for this restaurant' });
+
+    // Reject roles that should never start a session
+    const blockedRoles = ['order_taker', 'delivery_rider', 'kitchen_staff'];
+    if (blockedRoles.includes(req.user.role)) {
+      return res.status(403).json({ message: 'You do not have permission to start a business day session' });
+    }
+
+    // Check for an already-open session (auto-close if past cutoff first)
+    const existing = await DaySession.findOne({ restaurant: restaurantId, branch: branchId || null, status: 'OPEN' });
+    if (existing) {
+      await closeSessionIfPastCutoff(existing, cutoffHour, null);
+      if (existing.status !== 'CLOSED') {
+        return res.status(409).json({ message: 'A business day session is already open', code: 'ALREADY_OPEN' });
+      }
+    }
+
+    const session = await DaySession.create({
+      restaurant: restaurantId,
+      branch: branchId || null,
+      status: 'OPEN',
+      startAt: new Date(),
+      openedBy: req.user.id,
+    });
+
+    const io = req.app.get('io');
+    if (io) {
+      io.to(restaurantId.toString()).emit('session:started', {
+        id: session._id.toString(),
+        startAt: session.startAt,
+        branchId: branchId || null,
+      });
+    }
+
+    return res.status(201).json({
+      id: session._id.toString(),
+      startAt: session.startAt,
+      status: session.status,
+      openedBy: req.user.name || req.user.email || '',
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // @route   POST /api/pos/day-session/end
-// @desc    End the current OPEN day session; next order auto-starts a new one
+// @desc    End the current OPEN day session
 // @access  Staff / Cashier / Admin
 router.post('/day-session/end', async (req, res, next) => {
   try {

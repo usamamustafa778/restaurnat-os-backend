@@ -227,26 +227,55 @@ router.get('/orders', async (req, res, next) => {
       return res.status(400).json({ message: 'Restaurant context missing' });
     }
 
-    // Riders should only see orders from the currently OPEN business-day session(s).
-    // A restaurant can have multiple branches => multiple OPEN sessions at once.
+    // Open sessions define the active "business day". Active (in-progress) orders are
+    // scoped to these sessions so riders don't see stale orders from previous days.
+    // IMPORTANT: DELIVERED/CANCELLED orders must NOT be session-scoped — their session
+    // is closed once the business day ends, which would make them invisible in history.
     const openSessions = await DaySession.find({ restaurant: restaurantId, status: 'OPEN' }).select('_id').lean();
     const openSessionIds = openSessions.map((s) => s._id);
 
-    const statusFilter = req.query.status
-      ? req.query.status
-      : { $in: ['NEW_ORDER', 'PROCESSING', 'READY', 'OUT_FOR_DELIVERY', 'DELIVERED'] };
+    const riderMatch = [
+      { assignedRiderId: req.user.id },
+      { createdBy: req.user.id },
+    ];
 
-    const filter = {
-      restaurant: restaurantId,
-      $or: [
-        { assignedRiderId: req.user.id },
-        { createdBy: req.user.id },
-      ],
-      status: statusFilter,
-      ...(openSessionIds.length > 0 ? { daySession: { $in: openSessionIds } } : { daySession: null }),
-    };
-    const orders = await Order.find(filter).sort({ createdAt: -1 }).limit(100);
-    res.json(orders.map(mapRiderOrder));
+    const sessionConstraint = openSessionIds.length > 0
+      ? { daySession: { $in: openSessionIds } }
+      : { daySession: null };
+
+    // History window: 7 days so riders can always review recent deliveries
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+
+    // Run two targeted queries then merge, avoiding a single filter that would
+    // incorrectly exclude history orders from closed sessions.
+    const [activeOrders, historyOrders] = await Promise.all([
+      // Active orders: scope to open sessions only
+      Order.find({
+        restaurant: restaurantId,
+        $or: riderMatch,
+        status: { $in: ['NEW_ORDER', 'PROCESSING', 'READY', 'OUT_FOR_DELIVERY'] },
+        ...sessionConstraint,
+      }).sort({ createdAt: -1 }).limit(100).lean(),
+
+      // History (delivered / cancelled): no session constraint, last 7 days
+      Order.find({
+        restaurant: restaurantId,
+        $or: riderMatch,
+        status: { $in: ['DELIVERED', 'CANCELLED'] },
+        createdAt: { $gte: sevenDaysAgo },
+      }).sort({ createdAt: -1 }).limit(100).lean(),
+    ]);
+
+    // Merge and deduplicate by _id (an order cannot appear in both, but be safe)
+    const seen = new Set();
+    const merged = [];
+    for (const o of [...activeOrders, ...historyOrders]) {
+      const key = o._id.toString();
+      if (!seen.has(key)) { seen.add(key); merged.push(o); }
+    }
+    merged.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+    res.json(merged.map(mapRiderOrder));
   } catch (error) {
     next(error);
   }

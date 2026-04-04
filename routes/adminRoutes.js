@@ -833,8 +833,8 @@ const mapOrder = (order) => {
     source: order.source || 'POS',
     externalOrderId: order.externalOrderId || '',
     paymentMethod: paymentLabels[order.paymentMethod] || order.paymentMethod || 'To be paid',
-    isPaid: order.paymentMethod !== 'PENDING',
-    paymentStatus: (order.status === 'DELIVERED' || order.status === 'COMPLETED') ? 'PAID' : 'UNPAID',
+    isPaid: isOrderPaid(order),
+    paymentStatus: isOrderPaid(order) ? 'PAID' : 'UNPAID',
     paymentAmountReceived: order.paymentAmountReceived ?? null,
     paymentAmountReturned: order.paymentAmountReturned ?? null,
     paymentProvider: order.paymentProvider ?? null,
@@ -3755,26 +3755,34 @@ router.get('/dashboard/summary', async (req, res, next) => {
     startOfMonth.setDate(1);
     startOfMonth.setHours(0, 0, 0, 0);
 
-    // Align "today" with Business Day Report: use OPEN DaySession when present (daySession link), not calendar createdAt.
+    // Align "today" with Business Day Report: use DaySession links so the dashboard
+    // matches the Business Day Report. Crucially we include ALL sessions that started
+    // in today's business-day window (not just the single OPEN one) so that orders
+    // from a session closed mid-day are not silently dropped from the totals.
     let openSessionForToday = null;
+    let todaySessionIds = null;
     if (branchId) {
-      openSessionForToday = await DaySession.findOne({
+      const todaySessions = await DaySession.find({
         restaurant: restaurantId,
         branch: branchId,
-        status: 'OPEN',
+        startAt: { $gte: startOfDay },
       })
-        .select('_id startAt')
+        .select('_id startAt status')
         .lean();
+      if (todaySessions.length > 0) {
+        todaySessionIds = todaySessions.map((s) => s._id);
+        openSessionForToday = todaySessions.find((s) => s.status === 'OPEN') || null;
+      }
     }
 
-    const orderFilter = openSessionForToday
-      ? { restaurant: restaurantId, branch: branchId, daySession: openSessionForToday._id }
+    const orderFilter = todaySessionIds && todaySessionIds.length > 0
+      ? { restaurant: restaurantId, branch: branchId, daySession: { $in: todaySessionIds } }
       : { restaurant: restaurantId, createdAt: { $gte: startOfDay, $lte: endOfDay } };
-    if (!openSessionForToday && branchId) orderFilter.branch = branchId;
+    if (!todaySessionIds && branchId) orderFilter.branch = branchId;
 
     const pendingFilter = { restaurant: restaurantId, status: { $in: ['NEW_ORDER', 'PROCESSING', 'READY'] } };
     if (branchId) pendingFilter.branch = branchId;
-    if (openSessionForToday) pendingFilter.daySession = openSessionForToday._id;
+    if (todaySessionIds && todaySessionIds.length > 0) pendingFilter.daySession = { $in: todaySessionIds };
 
     const sevenDaysAgo = new Date();
     sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
@@ -3919,7 +3927,7 @@ router.get('/dashboard/summary', async (req, res, next) => {
       }));
 
     res.json({
-      todayScope: openSessionForToday ? 'daySession' : 'cutoff',
+      todayScope: todaySessionIds ? 'daySession' : 'cutoff',
       daySessionId: openSessionForToday ? openSessionForToday._id.toString() : null,
       todaysRevenue,
       todaysOrdersCount,
