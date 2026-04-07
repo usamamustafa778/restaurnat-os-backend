@@ -905,7 +905,7 @@ router.post(
         restaurant: restaurant._id,
         branch: branch ? branch._id : undefined,
         orderType: 'DELIVERY',
-        paymentMethod: 'CASH',
+        paymentMethod: 'PENDING',
         source: 'WEBSITE',
         status: 'NEW_ORDER',
         customerName: (customerName || '').trim() || 'Website Customer',

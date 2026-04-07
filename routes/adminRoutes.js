@@ -3196,6 +3196,13 @@ function isOrderPaid(order) {
     const totalDue = Number(order.grandTotal ?? order.total ?? 0) || 0;
     if (gross - returned >= totalDue) return true;
   }
+  // Tenant website orders use COD; "CASH" there means pay on delivery, not collected at POS yet.
+  if (order.source === 'WEBSITE') {
+    if (String(order.orderType || '').toUpperCase() === 'DELIVERY' && order.deliveryPaymentCollected === true) {
+      return true;
+    }
+    return false;
+  }
   const pm = String(order.paymentMethod || '').toUpperCase();
   if (pm === 'CASH' || pm === 'CARD' || pm === 'ONLINE' || pm === 'SPLIT' || pm === 'FOODPANDA') return true;
   if (String(order.orderType || '').toUpperCase() === 'DELIVERY' && order.deliveryPaymentCollected === true) return true;
