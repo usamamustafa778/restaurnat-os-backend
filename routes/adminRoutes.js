@@ -1079,12 +1079,9 @@ router.get('/orders/:id', async (req, res, next) => {
 
 // @route   PUT /api/admin/orders/:id
 // @desc    Update order (items, discount, customer, orderType, tableName) – for edit from POS
-// @access  Restaurant Admin / Admin / Manager / Cashier (order_taker view-only on orders)
+// @access  Restaurant Admin / Admin / Manager / Cashier; order_taker may update only orders they created (items / guest / table)
 router.put('/orders/:id', async (req, res, next) => {
   try {
-    if (req.user.role === 'order_taker') {
-      return res.status(403).json({ message: 'Order takers can only view orders' });
-    }
     const { id } = req.params;
     const { items, discountAmount, customerName, customerPhone, deliveryAddress, orderType, tableName, deliveryCharges } = req.body;
     const restaurantId = getRestaurantIdForRequest(req);
@@ -1102,6 +1099,22 @@ router.put('/orders/:id', async (req, res, next) => {
     }
     if (order.status === 'CANCELLED') {
       return res.status(400).json({ message: 'Cannot update cancelled order' });
+    }
+
+    const isOrderTaker = req.user.role === 'order_taker';
+    if (isOrderTaker) {
+      const creatorRaw = order.createdBy;
+      const creatorId = creatorRaw
+        ? (typeof creatorRaw === 'object' && creatorRaw._id
+            ? String(creatorRaw._id)
+            : String(creatorRaw))
+        : null;
+      if (!creatorId || creatorId !== req.user.id) {
+        return res.status(403).json({ message: 'You can only edit orders you created' });
+      }
+      if (['DELIVERED', 'COMPLETED', 'OUT_FOR_DELIVERY'].includes(order.status)) {
+        return res.status(400).json({ message: 'Cannot update this order' });
+      }
     }
 
     if (Array.isArray(items) && items.length > 0) {
@@ -1129,7 +1142,9 @@ router.put('/orders/:id', async (req, res, next) => {
           note: (i.note || '').trim() || undefined,
         });
       }
-      const discount = Math.max(0, Number(discountAmount) ?? order.discountAmount ?? 0);
+      const discount = isOrderTaker
+        ? Math.max(0, Number(order.discountAmount) || 0)
+        : Math.max(0, Number(discountAmount) ?? order.discountAmount ?? 0);
       const total = Math.max(0, subtotal - discount);
 
       order.items = orderItems;
@@ -1138,18 +1153,18 @@ router.put('/orders/:id', async (req, res, next) => {
       order.total = total;
     }
 
-    if (discountAmount !== undefined && !(Array.isArray(items) && items.length > 0)) {
+    if (!isOrderTaker && discountAmount !== undefined && !(Array.isArray(items) && items.length > 0)) {
       order.discountAmount = Math.max(0, Number(discountAmount) || 0);
       order.total = Math.max(0, (order.subtotal || 0) - order.discountAmount);
     }
     if (customerName !== undefined) order.customerName = String(customerName || '').trim();
     if (customerPhone !== undefined) order.customerPhone = String(customerPhone || '').trim();
-    if (orderType !== undefined && ['DINE_IN', 'TAKEAWAY', 'DELIVERY'].includes(orderType)) order.orderType = orderType;
+    if (!isOrderTaker && orderType !== undefined && ['DINE_IN', 'TAKEAWAY', 'DELIVERY'].includes(orderType)) order.orderType = orderType;
     if (tableName !== undefined) order.tableName = String(tableName || '').trim();
-    if (deliveryCharges !== undefined && order.orderType === 'DELIVERY') {
+    if (!isOrderTaker && deliveryCharges !== undefined && order.orderType === 'DELIVERY') {
       order.deliveryCharges = Math.max(0, Number(deliveryCharges) || 0);
     }
-    if (deliveryAddress !== undefined && order.orderType === 'DELIVERY') {
+    if (!isOrderTaker && deliveryAddress !== undefined && order.orderType === 'DELIVERY') {
       order.deliveryAddress = String(deliveryAddress || '').trim();
     }
 
