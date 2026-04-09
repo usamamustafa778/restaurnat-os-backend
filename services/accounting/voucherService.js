@@ -28,6 +28,13 @@ async function postVoucher(voucherId) {
   const voucher = await Voucher.findById(voucherId);
   if (!voucher || voucher.status !== 'draft') throw new Error('Cannot post: voucher is not in draft status');
 
+  // Safety guard: every journal row must use its own voucher line accountId.
+  voucher.lines.forEach((line, i) => {
+    if (!line.accountId) {
+      throw new Error(`Line ${i + 1}: accountId is required before posting`);
+    }
+  });
+
   const journalEntries = voucher.lines.map((line) => ({
     tenantId:      voucher.tenantId,
     voucherId:     voucher._id,
@@ -45,6 +52,14 @@ async function postVoucher(voucherId) {
   }));
 
   // Debug: log ALL journal entries about to be inserted
+  console.log('Building journal entries:', JSON.stringify(
+    voucher.lines.map((l) => ({
+      accountId: l.accountId,
+      accountName: l.accountName,
+      debit: l.debit,
+      credit: l.credit,
+    })), null, 2
+  ));
   console.log(`[PostVoucher] ${voucher.voucherNumber}: inserting ${journalEntries.length} journal entries:`);
   journalEntries.forEach((e, i) => {
     console.log(`  [${i}] accountId=${e.accountId} | accountName=${e.accountName} | partyId=${e.partyId || 'none'} | partyName=${e.partyName || 'none'} | dr=${e.debit} | cr=${e.credit}`);

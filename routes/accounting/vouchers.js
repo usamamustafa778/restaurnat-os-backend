@@ -228,6 +228,7 @@ router.post('/', async (req, res) => {
     if (!restaurant) return;
 
     const { type, date, referenceNo, notes, lines } = req.body;
+    console.log('Raw request lines:', JSON.stringify(req.body.lines, null, 2));
 
     if (!type) return res.status(400).json({ message: 'Voucher type is required' });
     if (!date) return res.status(400).json({ message: 'Date is required' });

@@ -158,6 +158,39 @@ router.get('/day-book', async (req, res) => {
 
     const vouchers = await Voucher.find(filter).sort({ createdAt: 1 }).lean();
 
+    const voucherIds = vouchers.map((v) => v._id);
+    let journalLinesByVoucher = {};
+    if (voucherIds.length) {
+      const journalRows = await JournalEntry.find({
+        tenantId: new mongoose.Types.ObjectId(tenantId),
+        voucherId: { $in: voucherIds.map((id) => new mongoose.Types.ObjectId(id)) },
+      })
+        .sort({ date: 1, createdAt: 1 })
+        .lean();
+
+      journalLinesByVoucher = journalRows.reduce((acc, j) => {
+        const key = j.voucherId?.toString();
+        if (!key) return acc;
+        if (!acc[key]) acc[key] = [];
+        acc[key].push({
+          accountId: j.accountId,
+          accountName: j.accountName || '',
+          partyId: j.partyId || null,
+          partyName: j.partyName || '',
+          debit: j.debit || 0,
+          credit: j.credit || 0,
+          description: j.description || '',
+          sequence: j.sequence || 0,
+        });
+        return acc;
+      }, {});
+    }
+
+    const vouchersWithJournalLines = vouchers.map((v) => ({
+      ...v,
+      lines: journalLinesByVoucher[v._id.toString()] || [],
+    }));
+
     const summary = {
       cash_payment:  0,
       cash_receipt:  0,
@@ -167,12 +200,12 @@ router.get('/day-book', async (req, res) => {
       card_transfer: 0,
       total:         0,
     };
-    vouchers.forEach((v) => {
+    vouchersWithJournalLines.forEach((v) => {
       if (summary[v.type] !== undefined) summary[v.type] += v.totalAmount;
       summary.total += v.totalAmount;
     });
 
-    return res.json({ date, vouchers, summary });
+    return res.json({ date, vouchers: vouchersWithJournalLines, summary });
   } catch (err) {
     console.error('Day book error:', err);
     return res.status(500).json({ message: err.message || 'Failed to generate day book' });
@@ -212,8 +245,27 @@ router.get('/payables', async (req, res) => {
       },
     ]);
 
+    const lastPaymentRows = await JournalEntry.aggregate([
+      {
+        $match: {
+          tenantId: new mongoose.Types.ObjectId(tenantId),
+          partyId: { $in: supplierIds.map((id) => new mongoose.Types.ObjectId(id)) },
+          date: { $lte: asOf },
+        },
+      },
+      {
+        $group: {
+          _id: '$partyId',
+          lastPaymentDate: { $max: '$date' },
+        },
+      },
+    ]);
+
     const balanceMap = Object.fromEntries(
       ledgerBalances.map((b) => [b._id.toString(), b])
+    );
+    const lastPaymentMap = Object.fromEntries(
+      lastPaymentRows.map((r) => [r._id.toString(), r.lastPaymentDate])
     );
 
     const result = suppliers
@@ -221,7 +273,13 @@ router.get('/payables', async (req, res) => {
         const b = balanceMap[s._id.toString()] || { totalDebit: 0, totalCredit: 0 };
         // For payables: credit > debit means we owe them
         const balance = s.openingBalance + b.totalCredit - b.totalDebit;
-        return { ...s, balance };
+        const creditLimit = Number(s.creditLimit) || 0;
+        return {
+          ...s,
+          balance,
+          lastPaymentDate: lastPaymentMap[s._id.toString()] || null,
+          overdue: balance > creditLimit && creditLimit > 0,
+        };
       })
       .filter((s) => s.balance > 0.01)
       .sort((a, b) => b.balance - a.balance);
