@@ -412,9 +412,64 @@ router.get('/balance-sheet', async (req, res) => {
       return Object.fromEntries(rows.map((r) => [r._id.toString(), r]));
     }
 
-    const [prevMap, currMap] = await Promise.all([
+    // Helper: cumulative net P&L (revenue - cogs - expense) up to endDate
+    async function getNetProfitUpTo(endDate) {
+      const plResult = await JournalEntry.aggregate([
+        {
+          $match: {
+            tenantId: new mongoose.Types.ObjectId(tenantId),
+            date: { $lte: endDate },
+          },
+        },
+        {
+          $lookup: {
+            from: 'accounts',
+            localField: 'accountId',
+            foreignField: '_id',
+            as: 'account',
+          },
+        },
+        { $unwind: '$account' },
+        {
+          $match: {
+            'account.type': { $in: ['revenue', 'cogs', 'expense'] },
+          },
+        },
+        {
+          $group: {
+            _id: null,
+            totalRevenue: {
+              $sum: {
+                $cond: [
+                  { $eq: ['$account.type', 'revenue'] },
+                  { $subtract: ['$credit', '$debit'] },
+                  0,
+                ],
+              },
+            },
+            totalCosts: {
+              $sum: {
+                $cond: [
+                  { $in: ['$account.type', ['cogs', 'expense']] },
+                  { $subtract: ['$debit', '$credit'] },
+                  0,
+                ],
+              },
+            },
+          },
+        },
+      ]);
+
+      const totalRevenue = plResult[0]?.totalRevenue || 0;
+      const totalCosts = plResult[0]?.totalCosts || 0;
+      return totalRevenue - totalCosts;
+    }
+
+    const [prevMap, currMap, prevNetProfit, currNetProfit] = await Promise.all([
       getBalancesUpTo(prevMonthEnd),
       getBalancesUpTo(currMonthEnd),
+      getNetProfitUpTo(prevMonthEnd),
+      getNetProfitUpTo(currMonthEnd),
     ]);
 
     // Get all asset / liability / capital accounts
@@ -442,6 +497,14 @@ router.get('/balance-sheet', async (req, res) => {
     }
 
     const enriched = accounts.map(enrichAccount);
+
+    // Flow cumulative P&L into Retained Earnings (code 103) for both periods.
+    const retainedIdx = enriched.findIndex((a) => String(a.code) === '103');
+    if (retainedIdx !== -1) {
+      enriched[retainedIdx].prev += prevNetProfit;
+      enriched[retainedIdx].curr += currNetProfit;
+      enriched[retainedIdx].month = enriched[retainedIdx].curr - enriched[retainedIdx].prev;
+    }
 
     const assets      = enriched.filter((a) => a.type === 'asset');
     const capital     = enriched.filter((a) => a.type === 'capital');

@@ -113,7 +113,7 @@ router.get('/:id/print', async (req, res) => {
     const timeStr = `${pad2(now.getHours())}:${pad2(now.getMinutes())}`;
     const dateFooter = `${pad2(now.getDate())}/${pad2(now.getMonth() + 1)}/${now.getFullYear()}`;
     const typeTitle = PRINT_TYPE_TITLE[voucher.type] || String(voucher.type || 'VOUCHER').toUpperCase();
-    const tenantName = restaurant.name || 'Restaurant';
+    const tenantName = restaurant.website?.name || restaurant.name || 'Restaurant';
     const createdByName = voucher.createdBy?.name || voucher.createdBy?.email || '—';
 
     const totalDebit = voucher.lines.reduce((s, l) => s + (l.debit || 0), 0);
