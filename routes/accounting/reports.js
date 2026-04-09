@@ -337,8 +337,41 @@ router.get('/cash-statement', async (req, res) => {
       .sort({ date: 1, createdAt: 1 })
       .lean();
 
-    const receipts = entries.filter((e) => e.debit  > 0);
-    const payments = entries.filter((e) => e.credit > 0);
+    let receipts = entries.filter((e) => (e.debit || 0) > 0);
+    let payments = entries.filter((e) => (e.credit || 0) > 0);
+
+    // Guard against malformed historical data where the same voucher appears
+    // on both sides for the same cash account. Keep each voucher in only one
+    // section (receipt if debit >= credit, otherwise payment).
+    const receiptTotalsByVoucher = receipts.reduce((acc, e) => {
+      const key = e.voucherNumber || String(e.voucherId || '');
+      acc[key] = (acc[key] || 0) + (e.debit || 0);
+      return acc;
+    }, {});
+    const paymentTotalsByVoucher = payments.reduce((acc, e) => {
+      const key = e.voucherNumber || String(e.voucherId || '');
+      acc[key] = (acc[key] || 0) + (e.credit || 0);
+      return acc;
+    }, {});
+
+    const overlapKeys = Object.keys(receiptTotalsByVoucher).filter(
+      (k) => paymentTotalsByVoucher[k] !== undefined
+    );
+    if (overlapKeys.length) {
+      const keepAsReceipt = new Set(
+        overlapKeys.filter(
+          (k) => (receiptTotalsByVoucher[k] || 0) >= (paymentTotalsByVoucher[k] || 0)
+        )
+      );
+      receipts = receipts.filter((e) => {
+        const key = e.voucherNumber || String(e.voucherId || '');
+        return !overlapKeys.includes(key) || keepAsReceipt.has(key);
+      });
+      payments = payments.filter((e) => {
+        const key = e.voucherNumber || String(e.voucherId || '');
+        return !overlapKeys.includes(key) || !keepAsReceipt.has(key);
+      });
+    }
 
     const totalReceipts = receipts.reduce((s, e) => s + e.debit,  0);
     const totalPayments = payments.reduce((s, e) => s + e.credit, 0);
