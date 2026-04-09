@@ -336,7 +336,14 @@ router.get('/orders', async (req, res, next) => {
     ];
 
     const sessionConstraint = openSessionIds.length > 0
-      ? { daySession: { $in: openSessionIds } }
+      ? {
+          $or: [
+            { daySession: { $in: openSessionIds } },
+            // Website storefront orders may not be attached to a DaySession.
+            // Keep them visible to assigned riders when still active.
+            { source: 'WEBSITE', daySession: null },
+          ],
+        }
       : { daySession: null };
 
     // History window: 7 days so riders can always review recent deliveries
