@@ -17,6 +17,7 @@ const Reservation = require('../models/Reservation');
 const DailyCurrency = require('../models/DailyCurrency');
 const CashDrawerLog = require('../models/CashDrawerLog');
 const PaymentAccount = require('../models/PaymentAccount');
+const Account = require('../models/accounting/Account');
 const DaySession = require('../models/DaySession');
 const AgentConversation = require('../models/AgentConversation');
 const { protect, requireRole, requireRestaurant, checkSubscriptionStatus, resolveBranch } = require('../middleware/authMiddleware');
@@ -5105,8 +5106,48 @@ const mapPaymentAccount = (a) => ({
   id: a._id.toString(),
   name: a.name,
   description: a.description || '',
+  accountType: a.accountType || null,
+  accountNumber: a.accountNumber || '',
+  bankName: a.bankName || '',
+  accountingAccountId: a.accountingAccountId?._id
+    ? a.accountingAccountId._id.toString()
+    : (a.accountingAccountId ? a.accountingAccountId.toString() : null),
+  accountingAccountName:
+    a.accountingAccountId?.name ||
+    a.accountingAccountName ||
+    null,
+  accountingAccountCode: a.accountingAccountId?.code || null,
+  isActive: a.isActive !== false,
   createdAt: a.createdAt,
 });
+
+function normalizePaymentAccountType(value) {
+  const v = String(value || '').trim().toLowerCase();
+  const allowed = new Set(['cash', 'easypaisa', 'jazzcash', 'bank', 'card', 'other']);
+  return allowed.has(v) ? v : 'other';
+}
+
+async function resolveAccountingAccountForPayment(restaurantId, accountingAccountId) {
+  if (!accountingAccountId) {
+    return { accountingAccountId: null, accountingAccountName: null };
+  }
+  if (!mongoose.Types.ObjectId.isValid(accountingAccountId)) {
+    throw new Error('Invalid accountingAccountId');
+  }
+  const account = await Account.findOne({
+    _id: new mongoose.Types.ObjectId(accountingAccountId),
+    tenantId: restaurantId,
+    type: 'asset',
+    isActive: true,
+  }).lean();
+  if (!account) {
+    throw new Error('Accounting account not found');
+  }
+  return {
+    accountingAccountId: account._id,
+    accountingAccountName: account.name,
+  };
+}
 
 // @route   GET /api/admin/payment-accounts
 // @desc    List all payment accounts for the authenticated tenant
@@ -5114,7 +5155,9 @@ const mapPaymentAccount = (a) => ({
 router.get('/payment-accounts', async (req, res, next) => {
   try {
     const restaurantId = getRestaurantIdForRequest(req);
-    const accounts = await PaymentAccount.find({ restaurant: restaurantId }).sort({ createdAt: 1 });
+    const accounts = await PaymentAccount.find({ restaurant: restaurantId })
+      .populate('accountingAccountId', 'name code')
+      .sort({ createdAt: 1 });
     res.json(accounts.map(mapPaymentAccount));
   } catch (error) {
     next(error);
@@ -5130,16 +5173,37 @@ router.post('/payment-accounts', async (req, res, next) => {
       return res.status(403).json({ message: 'Insufficient permissions to create payment accounts' });
     }
     const restaurantId = getRestaurantIdForRequest(req);
-    const { name, description } = req.body;
+    const {
+      name,
+      description,
+      accountType,
+      accountNumber,
+      bankName,
+      accountingAccountId,
+      isActive,
+    } = req.body || {};
     if (!name || !name.trim()) {
       return res.status(400).json({ message: 'name is required' });
+    }
+    let linked = { accountingAccountId: null, accountingAccountName: null };
+    try {
+      linked = await resolveAccountingAccountForPayment(restaurantId, accountingAccountId);
+    } catch (err) {
+      return res.status(400).json({ message: err.message });
     }
     const account = await PaymentAccount.create({
       restaurant: restaurantId,
       name: name.trim(),
       description: description ? description.trim() : '',
+      accountType: normalizePaymentAccountType(accountType),
+      accountNumber: accountNumber ? String(accountNumber).trim() : '',
+      bankName: bankName ? String(bankName).trim() : '',
+      accountingAccountId: linked.accountingAccountId,
+      accountingAccountName: linked.accountingAccountName,
+      isActive: isActive !== undefined ? Boolean(isActive) : true,
     });
-    res.status(201).json(mapPaymentAccount(account));
+    const populated = await PaymentAccount.findById(account._id).populate('accountingAccountId', 'name code');
+    res.status(201).json(mapPaymentAccount(populated));
   } catch (error) {
     if (error.code === 11000) {
       return res.status(409).json({ message: 'A payment account with this name already exists' });
@@ -5161,7 +5225,15 @@ router.put('/payment-accounts/:id', async (req, res, next) => {
     if (!account) {
       return res.status(404).json({ message: 'Payment account not found' });
     }
-    const { name, description } = req.body;
+    const {
+      name,
+      description,
+      accountType,
+      accountNumber,
+      bankName,
+      accountingAccountId,
+      isActive,
+    } = req.body || {};
     if (name !== undefined) {
       if (!name.trim()) return res.status(400).json({ message: 'name cannot be empty' });
       account.name = name.trim();
@@ -5169,12 +5241,130 @@ router.put('/payment-accounts/:id', async (req, res, next) => {
     if (description !== undefined) {
       account.description = description.trim();
     }
+    if (accountType !== undefined) {
+      account.accountType = normalizePaymentAccountType(accountType);
+    }
+    if (accountNumber !== undefined) {
+      account.accountNumber = String(accountNumber || '').trim();
+    }
+    if (bankName !== undefined) {
+      account.bankName = String(bankName || '').trim();
+    }
+    if (isActive !== undefined) {
+      account.isActive = Boolean(isActive);
+    }
+    if (accountingAccountId !== undefined) {
+      try {
+        const linked = await resolveAccountingAccountForPayment(restaurantId, accountingAccountId);
+        account.accountingAccountId = linked.accountingAccountId;
+        account.accountingAccountName = linked.accountingAccountName;
+      } catch (err) {
+        return res.status(400).json({ message: err.message });
+      }
+    }
     await account.save();
-    res.json(mapPaymentAccount(account));
+    const populated = await PaymentAccount.findById(account._id).populate('accountingAccountId', 'name code');
+    res.json(mapPaymentAccount(populated));
   } catch (error) {
     if (error.code === 11000) {
       return res.status(409).json({ message: 'A payment account with this name already exists' });
     }
+    next(error);
+  }
+});
+
+// @route   PATCH /api/admin/payment-accounts/:id
+// @desc    Partially update payment account; denormalize accounting account name
+// @access  Restaurant Admin / Admin / Manager
+router.patch('/payment-accounts/:id', async (req, res, next) => {
+  try {
+    if (!['restaurant_admin', 'super_admin', 'admin', 'manager'].includes(req.user.role)) {
+      return res.status(403).json({ message: 'Insufficient permissions to update payment accounts' });
+    }
+    const restaurantId = getRestaurantIdForRequest(req);
+    const account = await PaymentAccount.findOne({ _id: req.params.id, restaurant: restaurantId });
+    if (!account) {
+      return res.status(404).json({ message: 'Payment account not found' });
+    }
+
+    const {
+      name,
+      description,
+      accountType,
+      accountNumber,
+      bankName,
+      accountingAccountId,
+      isActive,
+    } = req.body || {};
+
+    if (name !== undefined) {
+      if (!String(name).trim()) return res.status(400).json({ message: 'name cannot be empty' });
+      account.name = String(name).trim();
+    }
+    if (description !== undefined) {
+      account.description = String(description || '').trim();
+    }
+    if (accountType !== undefined) {
+      account.accountType = normalizePaymentAccountType(accountType);
+    }
+    if (accountNumber !== undefined) {
+      account.accountNumber = String(accountNumber || '').trim();
+    }
+    if (bankName !== undefined) {
+      account.bankName = String(bankName || '').trim();
+    }
+    if (isActive !== undefined) {
+      account.isActive = Boolean(isActive);
+    }
+    if (accountingAccountId !== undefined) {
+      try {
+        const linked = await resolveAccountingAccountForPayment(restaurantId, accountingAccountId);
+        account.accountingAccountId = linked.accountingAccountId;
+        account.accountingAccountName = linked.accountingAccountName;
+      } catch (err) {
+        return res.status(400).json({ message: err.message });
+      }
+    }
+
+    await account.save();
+    const populated = await PaymentAccount.findById(account._id).populate('accountingAccountId', 'name code');
+    res.json(mapPaymentAccount(populated));
+  } catch (error) {
+    if (error.code === 11000) {
+      return res.status(409).json({ message: 'A payment account with this name already exists' });
+    }
+    next(error);
+  }
+});
+
+// @route   POST /api/admin/payment-accounts/migrate-types
+// @desc    One-time migration: infer accountType from name when missing/null
+// @access  Restaurant Admin / Admin / Manager
+router.post('/payment-accounts/migrate-types', async (req, res, next) => {
+  try {
+    if (!['restaurant_admin', 'super_admin', 'admin', 'manager'].includes(req.user.role)) {
+      return res.status(403).json({ message: 'Insufficient permissions to migrate payment accounts' });
+    }
+    const restaurantId = getRestaurantIdForRequest(req);
+    const accounts = await PaymentAccount.find({
+      restaurant: restaurantId,
+      $or: [{ accountType: { $exists: false } }, { accountType: null }, { accountType: '' }],
+    });
+
+    let updated = 0;
+    for (const acc of accounts) {
+      const n = String(acc.name || '').toLowerCase();
+      if (n.includes('easypaisa')) acc.accountType = 'easypaisa';
+      else if (n.includes('jazzcash')) acc.accountType = 'jazzcash';
+      else if (n.includes('bank')) acc.accountType = 'bank';
+      else if (n.includes('cash')) acc.accountType = 'cash';
+      else acc.accountType = 'other';
+      await acc.save();
+      updated += 1;
+    }
+
+    return res.json({ migrated: updated });
+  } catch (error) {
     next(error);
   }
 });

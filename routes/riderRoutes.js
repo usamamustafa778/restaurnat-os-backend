@@ -323,62 +323,80 @@ router.get('/orders', async (req, res, next) => {
       return res.status(400).json({ message: 'Restaurant context missing' });
     }
 
-    // Open sessions define the active "business day". Active (in-progress) orders are
-    // scoped to these sessions so riders don't see stale orders from previous days.
-    // IMPORTANT: DELIVERED/CANCELLED orders must NOT be session-scoped — their session
-    // is closed once the business day ends, which would make them invisible in history.
+    const range = String(req.query.range || 'today').toLowerCase();
+    const now = new Date();
+    const toStartOfDay = (d) => {
+      const v = new Date(d);
+      v.setHours(0, 0, 0, 0);
+      return v;
+    };
+    const addDays = (d, days) => {
+      const v = new Date(d);
+      v.setDate(v.getDate() + days);
+      return v;
+    };
+    const parseDateOnly = (value) => {
+      if (!value || typeof value !== 'string') return null;
+      const m = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+      if (!m) return null;
+      const y = Number(m[1]);
+      const mo = Number(m[2]);
+      const da = Number(m[3]);
+      const v = new Date(y, mo - 1, da);
+      if (Number.isNaN(v.getTime())) return null;
+      return toStartOfDay(v);
+    };
+
+    let dayStart = toStartOfDay(now);
+    let dayEnd = addDays(dayStart, 1);
+    if (range === 'yesterday') {
+      dayStart = addDays(dayStart, -1);
+      dayEnd = addDays(dayStart, 1);
+    } else if (range === 'week') {
+      const day = dayStart.getDay(); // 0=Sun
+      const diffToMonday = day === 0 ? 6 : day - 1;
+      dayStart = addDays(dayStart, -diffToMonday);
+      dayEnd = addDays(dayStart, 7);
+    } else if (range === 'month') {
+      dayStart = new Date(dayStart.getFullYear(), dayStart.getMonth(), 1);
+      dayEnd = new Date(dayStart.getFullYear(), dayStart.getMonth() + 1, 1);
+    } else if (range === 'custom') {
+      const from = parseDateOnly(req.query.from);
+      const to = parseDateOnly(req.query.to);
+      if (!from || !to || to < from) {
+        return res.status(400).json({ message: 'For custom range, valid from/to dates are required (YYYY-MM-DD).' });
+      }
+      dayStart = from;
+      dayEnd = addDays(to, 1); // inclusive "to" date
+    }
+
     const openSessions = await DaySession.find({ restaurant: restaurantId, status: 'OPEN' }).select('_id').lean();
     const openSessionIds = openSessions.map((s) => s._id);
 
-    const riderMatch = [
-      { assignedRiderId: req.user.id },
-      { createdBy: req.user.id },
-    ];
+    // Rider should only see their own assigned deliveries.
+    const riderMatch = { assignedRiderId: req.user.id };
 
-    const sessionConstraint = openSessionIds.length > 0
-      ? {
-          $or: [
-            { daySession: { $in: openSessionIds } },
-            // Website storefront orders may not be attached to a DaySession.
-            // Keep them visible to assigned riders when still active.
-            { source: 'WEBSITE', daySession: null },
-          ],
-        }
-      : { daySession: null };
+    const isToday = range === 'today';
+    const businessDayConstraint = isToday
+      ? (openSessionIds.length > 0
+          ? {
+              $or: [
+                { daySession: { $in: openSessionIds } },
+                // Some orders can be created without daySession linkage.
+                { daySession: null, createdAt: { $gte: dayStart, $lt: dayEnd } },
+              ],
+            }
+          : { createdAt: { $gte: dayStart, $lt: dayEnd } })
+      : { createdAt: { $gte: dayStart, $lt: dayEnd } };
 
-    // History window: 7 days so riders can always review recent deliveries
-    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const orders = await Order.find({
+      restaurant: restaurantId,
+      ...riderMatch,
+      status: { $in: ['NEW_ORDER', 'PROCESSING', 'READY', 'OUT_FOR_DELIVERY', 'DELIVERED', 'CANCELLED'] },
+      ...businessDayConstraint,
+    }).sort({ createdAt: -1 }).limit(200).lean();
 
-    // Run two targeted queries then merge, avoiding a single filter that would
-    // incorrectly exclude history orders from closed sessions.
-    const [activeOrders, historyOrders] = await Promise.all([
-      // Active orders: scope to open sessions only
-      Order.find({
-        restaurant: restaurantId,
-        $or: riderMatch,
-        status: { $in: ['NEW_ORDER', 'PROCESSING', 'READY', 'OUT_FOR_DELIVERY'] },
-        ...sessionConstraint,
-      }).sort({ createdAt: -1 }).limit(100).lean(),
-
-      // History (delivered / cancelled): no session constraint, last 7 days
-      Order.find({
-        restaurant: restaurantId,
-        $or: riderMatch,
-        status: { $in: ['DELIVERED', 'CANCELLED'] },
-        createdAt: { $gte: sevenDaysAgo },
-      }).sort({ createdAt: -1 }).limit(100).lean(),
-    ]);
-
-    // Merge and deduplicate by _id (an order cannot appear in both, but be safe)
-    const seen = new Set();
-    const merged = [];
-    for (const o of [...activeOrders, ...historyOrders]) {
-      const key = o._id.toString();
-      if (!seen.has(key)) { seen.add(key); merged.push(o); }
-    }
-    merged.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-
-    res.json(merged.map(mapRiderOrder));
+    res.json(orders.map(mapRiderOrder));
   } catch (error) {
     next(error);
   }

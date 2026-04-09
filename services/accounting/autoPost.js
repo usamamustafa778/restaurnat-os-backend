@@ -39,11 +39,78 @@ function resolveVoucherType(order) {
   return 'bank_receipt';
 }
 
+async function getAccountingAccountForPayment(tenantId, paymentMethodName, paymentAccountId) {
+  const PaymentAccount = require('../../models/PaymentAccount');
+
+  // First priority: explicit linked accounting account on payment account
+  if (paymentAccountId) {
+    const pa = await PaymentAccount.findOne({
+      _id: paymentAccountId,
+      restaurant: tenantId,
+    }).lean();
+    if (pa?.accountingAccountId) {
+      return pa.accountingAccountId;
+    }
+  }
+
+  // Second priority: payment account type mapping
+  if (paymentAccountId) {
+    const pa = await PaymentAccount.findOne({
+      _id: paymentAccountId,
+      restaurant: tenantId,
+    }).lean();
+    if (pa?.accountType) {
+      const typeToCodeMap = {
+        cash: '30101',
+        easypaisa: '30301',
+        jazzcash: '30302',
+        bank: '30201',
+        card: '304',
+      };
+      const code = typeToCodeMap[pa.accountType];
+      if (code) {
+        const account = await Account.findOne({ tenantId, code }).lean();
+        if (account) return account._id;
+      }
+    }
+  }
+
+  // Third priority: fallback by payment method / provider name
+  const methodLower = paymentMethodName?.toLowerCase() || '';
+  if (methodLower) {
+    const matchedByName = await PaymentAccount.findOne({
+      restaurant: tenantId,
+      name: { $regex: `^${String(paymentMethodName).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, $options: 'i' },
+    }).lean();
+    if (matchedByName?.accountingAccountId) return matchedByName.accountingAccountId;
+  }
+
+  // Fourth priority: keyword map by payment method / provider text
+  const nameToCodeMap = {
+    cash: '30101',
+    easypaisa: '30301',
+    jazzcash: '30302',
+    card: '304',
+    online: '30301',
+    bank: '30201',
+  };
+  for (const [key, code] of Object.entries(nameToCodeMap)) {
+    if (methodLower.includes(key)) {
+      const account = await Account.findOne({ tenantId, code }).lean();
+      if (account) return account._id;
+    }
+  }
+
+  // Final fallback: Cash in Hand
+  const cashAccount = await Account.findOne({ tenantId, code: '30101' }).lean();
+  return cashAccount?._id || null;
+}
+
 /**
  * Build accounting lines for a completed order.
  * Handles: cash, card, online (easypaisa/jazzcash), split payments.
  */
-function buildOrderLines(order, acc) {
+async function buildOrderLines(order, acc, tenantId) {
   const netTotal   = order.grandTotal ?? order.total;       // amount actually collected
   const grossSales = order.subtotal  ?? netTotal;            // before discount
   const discount   = order.discountAmount || 0;
@@ -58,16 +125,26 @@ function buildOrderLines(order, acc) {
     if (cash   > 0 && acc['30101']) lines.push({ accountId: acc['30101'], debit: cash,   credit: 0, description: `Cash portion – Order #${order.orderNumber}` });
     if (card   > 0 && acc['30201']) lines.push({ accountId: acc['30201'], debit: card,   credit: 0, description: `Card portion – Order #${order.orderNumber}` });
     if (online > 0) {
-      const provider = (order.splitOnlineProvider || '').toLowerCase();
-      const onlineAccId = provider.includes('easypaisa') ? acc['30301']
-                        : provider.includes('jazzcash')   ? acc['30302']
-                        : acc['30201'];
+      const onlineAccId = await getAccountingAccountForPayment(
+        tenantId,
+        order.splitOnlineProvider || order.paymentProvider || order.paymentMethod,
+        order.splitOnlinePaymentAccountId || order.paymentAccountId || null
+      );
       if (onlineAccId) lines.push({ accountId: onlineAccId, debit: online, credit: 0, description: `Online portion – Order #${order.orderNumber}` });
     }
   } else {
-    const payCode = resolvePaymentAccountCode(order);
-    if (acc[payCode]) {
-      lines.push({ accountId: acc[payCode], debit: netTotal, credit: 0, description: `Order #${order.orderNumber}` });
+    const payAccountId = await getAccountingAccountForPayment(
+      tenantId,
+      order.paymentProvider || order.paymentMethod,
+      order.paymentAccountId || null
+    );
+    if (payAccountId) {
+      lines.push({ accountId: payAccountId, debit: netTotal, credit: 0, description: `Order #${order.orderNumber}` });
+    } else {
+      const payCode = resolvePaymentAccountCode(order);
+      if (acc[payCode]) {
+        lines.push({ accountId: acc[payCode], debit: netTotal, credit: 0, description: `Order #${order.orderNumber}` });
+      }
     }
   }
 
@@ -117,7 +194,7 @@ async function autoPostOrder(orderId, tenantId) {
 
   const acc = Object.fromEntries(accounts.map((a) => [a.code, a._id]));
 
-  const lines = buildOrderLines(order, acc);
+  const lines = await buildOrderLines(order, acc, tenantId);
   if (!lines.length) return { skipped: true, reason: 'no_account_mapping' };
 
   const { createVoucher } = require('./voucherService');

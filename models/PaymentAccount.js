@@ -18,6 +18,34 @@ const paymentAccountSchema = new mongoose.Schema(
       trim: true,
       default: '',
     },
+    accountType: {
+      type: String,
+      enum: ['cash', 'easypaisa', 'jazzcash', 'bank', 'card', 'other'],
+      default: 'other',
+    },
+    accountNumber: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+    bankName: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+    accountingAccountId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Account',
+      default: null,
+    },
+    accountingAccountName: {
+      type: String,
+      default: null,
+    },
+    isActive: {
+      type: Boolean,
+      default: true,
+    },
   },
   {
     timestamps: true,
