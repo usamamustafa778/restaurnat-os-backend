@@ -3402,9 +3402,12 @@ router.get('/reports/sales', async (req, res, next) => {
       }
       totalProfit += orderRevenue - orderCost;
       for (const item of order.items) {
-        const key = item.menuItem.toString();
+        const key =
+          item.menuItem != null
+            ? item.menuItem.toString()
+            : `__no_menu__:${String(item.name || '').toLowerCase()}:${Number(item.unitPrice) || 0}`;
         const existing = itemStats.get(key) || {
-          menuItemId: item.menuItem,
+          menuItemId: item.menuItem ?? null,
           name: item.name,
           quantity: 0,
           revenue: 0,
