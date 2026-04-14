@@ -3,6 +3,7 @@ const router = express.Router();
 const Deal = require('../models/Deal');
 const DealUsage = require('../models/DealUsage');
 const { protect } = require('../middleware/authMiddleware');
+const { findBestDeals } = require('../utils/dealCalculator');
 
 /**
  * @route   POST /api/deals
@@ -115,6 +116,60 @@ router.get('/active', async (req, res) => {
     res.json(deals);
   } catch (error) {
     res.status(500).json({ message: error.message });
+  }
+});
+
+/**
+ * @route   POST /api/deals/find-applicable
+ * @desc    Find applicable deals for a cart/subtotal
+ * @access  Authenticated users (POS/Admin/Rider)
+ */
+router.post('/find-applicable', protect, async (req, res) => {
+  try {
+    const { orderItems = [], subtotal = 0, customerId = null, branchId = null } = req.body || {};
+    const restaurantId = req.user.restaurant;
+    if (!restaurantId) {
+      console.error('[POST /api/deals/find-applicable] Missing req.user.restaurant', {
+        userId: req.user?.id,
+        role: req.user?.role,
+      });
+      return res.status(400).json({ message: 'Restaurant context is required' });
+    }
+
+    const dealsWithDiscounts = await findBestDeals(
+      restaurantId,
+      branchId,
+      Array.isArray(orderItems) ? orderItems : [],
+      Number(subtotal) || 0,
+      customerId || null
+    );
+
+    const payload = dealsWithDiscounts.map((entry) => {
+      const d = entry.deal;
+      return {
+        id: d._id?.toString?.() || d.id,
+        _id: d._id,
+        name: d.name,
+        description: d.description || '',
+        dealType: d.dealType,
+        discountPercentage: d.discountPercentage ?? null,
+        discountAmount: d.discountAmount ?? null,
+        minimumPurchaseAmount: d.minimumPurchaseAmount ?? null,
+        buyQuantity: d.buyQuantity ?? null,
+        getQuantity: d.getQuantity ?? null,
+        allowStacking: !!d.canStackWithOtherDeals,
+        priority: d.priority ?? 0,
+        calculatedDiscount: entry.discountAmount || 0,
+      };
+    });
+
+    res.json(payload);
+  } catch (error) {
+    console.error('[POST /api/deals/find-applicable]', error?.message || error, error?.stack);
+    res.status(500).json({
+      message: error?.message || 'Failed to find applicable deals',
+      code: 'FIND_APPLICABLE_DEALS_FAILED',
+    });
   }
 });
 

@@ -121,6 +121,10 @@ router.post('/login', async (req, res, next) => {
       return res.status(401).json({ message: 'Invalid credentials' });
     }
 
+    if (user.isActive === false) {
+      return res.status(403).json({ message: 'This account has been deactivated. Contact your manager.' });
+    }
+
     if (!user.emailVerified) {
       // Re-send verification OTP on login attempt
       const otp = Math.floor(100000 + Math.random() * 900000).toString();
@@ -161,6 +165,9 @@ router.post('/login', async (req, res, next) => {
       defaultBranchId = branchCtx.defaultBranchId;
       allowedBranchIds = branchCtx.allowedBranchIds;
     }
+
+    user.lastLoginAt = new Date();
+    await user.save({ validateBeforeSave: false });
 
     const token = generateToken(user, restaurantSlug);
 
@@ -394,9 +401,14 @@ router.post('/verify-email', async (req, res, next) => {
       return res.status(400).json({ message: 'Invalid or expired verification code' });
     }
 
+    if (user.isActive === false) {
+      return res.status(403).json({ message: 'This account has been deactivated. Contact your manager.' });
+    }
+
     user.emailVerified = true;
     user.emailVerificationOtp = undefined;
     user.emailVerificationOtpExpires = undefined;
+    user.lastLoginAt = new Date();
     await user.save();
 
     // Issue tokens like login

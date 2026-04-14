@@ -1,6 +1,34 @@
 const Deal = require('../models/Deal');
 const DealUsage = require('../models/DealUsage');
 
+/** Normalize Mongo refs / strings / populated docs to a comparable id string */
+function toRefString(ref) {
+  if (ref == null) return '';
+  if (typeof ref === 'object' && ref._id != null) return String(ref._id);
+  return String(ref);
+}
+
+/**
+ * POS and clients may send `menuItemId` instead of `menuItem`. Normalize so
+ * all calculators can safely use `oi.menuItem`.
+ */
+function normalizeOrderItemsForDeals(orderItems) {
+  if (!Array.isArray(orderItems)) return [];
+  return orderItems
+    .map((oi) => {
+      const menuItem = oi.menuItem ?? oi.menuItemId ?? oi.id;
+      if (menuItem === undefined || menuItem === null || menuItem === '') return null;
+      return {
+        ...oi,
+        menuItem,
+        quantity: Number(oi.quantity) || 0,
+        price: Number(oi.price) || 0,
+        category: oi.category ?? oi.categoryId ?? null,
+      };
+    })
+    .filter((oi) => oi && oi.quantity > 0);
+}
+
 /**
  * Calculate discount for a given deal and order items
  * @param {Object} deal - The deal object
@@ -107,9 +135,8 @@ const calculateComboDiscount = (deal, orderItems) => {
 
   // Check if order contains all combo items
   const hasAllComboItems = deal.comboItems.every((comboItem) => {
-    const orderItem = orderItems.find(
-      (oi) => oi.menuItem.toString() === comboItem.menuItem.toString()
-    );
+    const comboMid = toRefString(comboItem.menuItem);
+    const orderItem = orderItems.find((oi) => toRefString(oi.menuItem) === comboMid);
     return orderItem && orderItem.quantity >= comboItem.quantity;
   });
 
@@ -120,9 +147,8 @@ const calculateComboDiscount = (deal, orderItems) => {
   // Calculate original price of combo items
   let originalComboPrice = 0;
   deal.comboItems.forEach((comboItem) => {
-    const orderItem = orderItems.find(
-      (oi) => oi.menuItem.toString() === comboItem.menuItem.toString()
-    );
+    const comboMid = toRefString(comboItem.menuItem);
+    const orderItem = orderItems.find((oi) => toRefString(oi.menuItem) === comboMid);
     if (orderItem) {
       originalComboPrice += orderItem.price * comboItem.quantity;
     }
@@ -144,9 +170,11 @@ const calculateComboDiscount = (deal, orderItems) => {
  * Calculate Buy X Get Y discount
  */
 const calculateBuyXGetYDiscount = (deal, orderItems) => {
-  const buyItem = orderItems.find(
-    (oi) => oi.menuItem.toString() === deal.buyMenuItem.toString()
-  );
+  if (!deal.buyMenuItem) {
+    return { discountAmount: 0, modifiedItems: [], dealApplied: false };
+  }
+  const buyMid = toRefString(deal.buyMenuItem);
+  const buyItem = orderItems.find((oi) => toRefString(oi.menuItem) === buyMid);
 
   if (!buyItem || buyItem.quantity < deal.buyQuantity) {
     return { discountAmount: 0, modifiedItems: [], dealApplied: false };
@@ -157,9 +185,8 @@ const calculateBuyXGetYDiscount = (deal, orderItems) => {
 
   // Get the item to discount (could be same or different)
   const getItemId = deal.getMenuItem || deal.buyMenuItem;
-  const getItem = orderItems.find(
-    (oi) => oi.menuItem.toString() === getItemId.toString()
-  );
+  const getMid = toRefString(getItemId);
+  const getItem = orderItems.find((oi) => toRefString(oi.menuItem) === getMid);
 
   if (!getItem) {
     return { discountAmount: 0, modifiedItems: [], dealApplied: false };
@@ -212,11 +239,14 @@ const getApplicableItems = (deal, orderItems) => {
   }
 
   return orderItems.filter((item) => {
+    const itemMid = toRefString(item.menuItem);
+    if (!itemMid) return false;
+
     // Check if item is in applicableMenuItems
     if (
       deal.applicableMenuItems &&
       deal.applicableMenuItems.some(
-        (ami) => ami.toString() === item.menuItem.toString()
+        (ami) => toRefString(ami) === itemMid
       )
     ) {
       return true;
@@ -227,7 +257,7 @@ const getApplicableItems = (deal, orderItems) => {
       deal.applicableCategories &&
       item.category &&
       deal.applicableCategories.some(
-        (ac) => ac.toString() === item.category.toString()
+        (ac) => toRefString(ac) === toRefString(item.category)
       )
     ) {
       return true;
@@ -247,6 +277,8 @@ const getApplicableItems = (deal, orderItems) => {
  * @returns {Array} - Sorted array of deals with calculated discounts
  */
 const findBestDeals = async (restaurantId, branchId, orderItems, subtotal, customerId = null) => {
+  const normalizedItems = normalizeOrderItemsForDeals(orderItems);
+
   // Get all applicable deals
   const deals = await Deal.findApplicableDeals(restaurantId, branchId);
 
@@ -262,7 +294,7 @@ const findBestDeals = async (restaurantId, branchId, orderItems, subtotal, custo
       }
     }
 
-    const discountCalc = calculateDealDiscount(deal, orderItems, subtotal);
+    const discountCalc = calculateDealDiscount(deal, normalizedItems, subtotal);
     
     if (discountCalc.dealApplied && discountCalc.discountAmount > 0) {
       dealsWithDiscounts.push({
@@ -311,6 +343,7 @@ const applyBestDeals = (availableDeals, allowStacking = false) => {
 module.exports = {
   calculateDealDiscount,
   findBestDeals,
+  normalizeOrderItemsForDeals,
   applyBestDeals,
   calculatePercentageDiscount,
   calculateFixedDiscount,

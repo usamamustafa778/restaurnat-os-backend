@@ -235,7 +235,7 @@ router.get('/menu', async (req, res, next) => {
       }
       for (const inv of inventoryItems) {
         const currentStock = branchStockByInv.get(inv._id.toString()) ?? 0;
-        inventoryMap.set(inv._id.toString(), { name: inv.name, currentStock });
+        inventoryMap.set(inv._id.toString(), { name: inv.name, unit: inv.unit, currentStock });
       }
     } else {
       for (const inv of inventoryItems) {

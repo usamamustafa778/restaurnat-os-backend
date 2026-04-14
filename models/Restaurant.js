@@ -86,6 +86,7 @@ const websiteSettingsSchema = new mongoose.Schema(
     }],
     // Social Media Links
     socialMedia: {
+      whatsapp: String,
       facebook: String,
       instagram: String,
       twitter: String,
@@ -203,6 +204,23 @@ const restaurantSchema = new mongoose.Schema(
       currencyDenominations: {
         type: [Number],
         default: [],
+      },
+      /** Optional POS discount presets (id, label, percent, cashierAllowed). If empty, app uses defaults. */
+      posDiscountPresets: [
+        {
+          id: { type: String, trim: true },
+          label: { type: String, trim: true },
+          percent: { type: Number, min: 0, max: 100 },
+          requiresPin: { type: Boolean, default: false },
+          cashierAllowed: { type: Boolean, default: false },
+        },
+      ],
+      /** Optional POS discount reasons shown in POS modal. */
+      posDiscountReasons: [{ type: String, trim: true }],
+      /** bcrypt hash for cashier override / high % discounts (set from dashboard). */
+      posManagerDiscountPinHash: {
+        type: String,
+        default: '',
       },
     },
   },

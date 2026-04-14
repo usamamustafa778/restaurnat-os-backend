@@ -7,9 +7,11 @@ const Customer = require('../models/Customer');
 const Order = require('../models/Order');
 const Branch = require('../models/Branch');
 const Table = require('../models/Table');
+const Reservation = require('../models/Reservation');
 const PosDraft = require('../models/PosDraft');
 const DaySession = require('../models/DaySession');
 const Deal = require('../models/Deal');
+const bcrypt = require('bcryptjs');
 const { protect, requireRole, requireRestaurant, checkSubscriptionStatus } = require('../middleware/authMiddleware');
 const { generateOrderNumber } = require('../utils/orderNumber');
 const { mergedDeliveryLocations, pickDeliveryLocation } = require('../utils/deliveryLocations');
@@ -157,9 +159,130 @@ async function getCurrentOpenSession(restaurantId, branch) {
 
 const router = express.Router();
 
+const DEFAULT_POS_DISCOUNT_REASONS = [
+  'Customer complaint',
+  'Staff meal',
+  'Loyalty reward',
+  'Manager approval',
+  'Other',
+];
+const normalizeReasonKey = (s) => String(s || '').trim().toLowerCase();
+
 router.use(protect, requireRole('super_admin', 'staff', 'restaurant_admin', 'admin', 'cashier', 'manager', 'product_manager', 'kitchen_staff', 'order_taker', 'delivery_rider'), requireRestaurant, checkSubscriptionStatus);
 
-// Cost per single unit of a menu item from inventory consumptions (costPrice per 1000g/1000ml/12pc)
+// @route   POST /api/pos/verify-discount-pin
+// @desc    Verify manager PIN for high % POS discounts (cashier flow)
+router.post('/verify-discount-pin', async (req, res) => {
+  try {
+    const pin = String(req.body?.pin || '');
+    if (!pin) {
+      return res.status(400).json({ message: 'PIN is required' });
+    }
+    const hash = req.restaurant?.settings?.posManagerDiscountPinHash;
+    if (!hash) {
+      return res.status(400).json({ message: 'Manager discount PIN is not configured in restaurant settings' });
+    }
+    const ok = await bcrypt.compare(pin, hash);
+    if (!ok) {
+      return res.status(403).json({ message: 'Invalid PIN' });
+    }
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error('[POST /api/pos/verify-discount-pin]', e?.message || e, e?.stack);
+    return res.status(500).json({ message: e?.message || 'Verification failed' });
+  }
+});
+
+function normalizeUnit(unit) {
+  const u = String(unit || '').trim().toLowerCase();
+  if (u === 'g' || u === 'gram') return 'gram';
+  if (u === 'kg' || u === 'kilogram') return 'kilogram';
+  if (u === 'ml' || u === 'milliliter') return 'milliliter';
+  if (u === 'l' || u === 'liter') return 'liter';
+  if (u === 'pc' || u === 'pcs' || u === 'piece') return 'piece';
+  if (u === 'dozen') return 'dozen';
+  return u || 'piece';
+}
+
+function convertRecipeQtyToInventoryStockQty(recipeQty, recipeUnitRaw, inventoryUnitRaw) {
+  const recipeQtyNum = Number(recipeQty || 0);
+  if (!recipeQtyNum) return 0;
+  const recipeUnit = normalizeUnit(recipeUnitRaw);
+  const inventoryUnit = normalizeUnit(inventoryUnitRaw);
+
+  if (inventoryUnit === 'kilogram') {
+    if (recipeUnit === 'gram') return recipeQtyNum / 1000;
+    if (recipeUnit === 'kilogram') return recipeQtyNum;
+  }
+  if (inventoryUnit === 'gram') {
+    if (recipeUnit === 'gram') return recipeQtyNum;
+    if (recipeUnit === 'kilogram') return recipeQtyNum * 1000;
+  }
+  if (inventoryUnit === 'liter') {
+    if (recipeUnit === 'milliliter') return recipeQtyNum / 1000;
+    if (recipeUnit === 'liter') return recipeQtyNum;
+  }
+  if (inventoryUnit === 'milliliter') {
+    if (recipeUnit === 'milliliter') return recipeQtyNum;
+    if (recipeUnit === 'liter') return recipeQtyNum * 1000;
+  }
+  if (inventoryUnit === 'dozen') {
+    if (recipeUnit === 'piece') return recipeQtyNum / 12;
+    if (recipeUnit === 'dozen') return recipeQtyNum;
+  }
+  // piece-like units default to piece counts
+  if (
+    inventoryUnit === 'piece' ||
+    inventoryUnit === 'bottle' ||
+    inventoryUnit === 'can' ||
+    inventoryUnit === 'pack' ||
+    inventoryUnit === 'bag' ||
+    inventoryUnit === 'box'
+  ) {
+    if (recipeUnit === 'piece') return recipeQtyNum;
+    if (recipeUnit === 'dozen') return recipeQtyNum * 12;
+  }
+  return recipeQtyNum;
+}
+
+function getIngredientCostFromRecipeQty(recipeQty, recipeUnitRaw, invItem) {
+  const qty = Number(recipeQty || 0);
+  if (!qty || !invItem || invItem.costPrice == null) return 0;
+  const recipeUnit = normalizeUnit(recipeUnitRaw);
+  const inventoryUnit = normalizeUnit(invItem.unit);
+  const costPrice = Number(invItem.costPrice || 0);
+  let ingredientCost = 0;
+
+  if (recipeUnit === 'gram' && (inventoryUnit === 'kilogram' || inventoryUnit === 'gram')) {
+    ingredientCost = (qty / 1000) * costPrice;
+  } else if (recipeUnit === 'kilogram') {
+    ingredientCost = qty * costPrice;
+  } else if (recipeUnit === 'milliliter' && (inventoryUnit === 'liter' || inventoryUnit === 'milliliter')) {
+    ingredientCost = (qty / 1000) * costPrice;
+  } else if (recipeUnit === 'liter') {
+    ingredientCost = qty * costPrice;
+  } else if (recipeUnit === 'piece' && inventoryUnit === 'dozen') {
+    ingredientCost = (qty / 12) * costPrice;
+  } else if (recipeUnit === 'piece' && inventoryUnit === 'piece') {
+    ingredientCost = qty * costPrice;
+  } else if (recipeUnit === 'dozen') {
+    ingredientCost = qty * costPrice;
+  } else {
+    ingredientCost = qty * costPrice;
+  }
+
+  console.log('COGS per ingredient:', {
+    item: invItem.name,
+    recipeQty: qty,
+    recipeUnit: recipeUnitRaw,
+    inventoryUnit: invItem.unit,
+    costPrice: invItem.costPrice,
+    ingredientCost,
+  });
+  return ingredientCost;
+}
+
+// Cost per single unit of a menu item from inventory consumptions
 function getMenuItemIngredientCost(menuItem, inventoryMap) {
   if (!menuItem?.inventoryConsumptions?.length) return 0;
   let cost = 0;
@@ -169,10 +292,7 @@ function getMenuItemIngredientCost(menuItem, inventoryMap) {
     const inv = inventoryMap.get(invId);
     if (!inv || inv.costPrice == null) continue;
     const qty = c.quantity || 0;
-    const unit = (inv.unit || '').toLowerCase();
-    if (unit === 'gram' || unit === 'kg') cost += (qty / 1000) * inv.costPrice;
-    else if (unit === 'ml' || unit === 'liter') cost += (qty / 1000) * inv.costPrice;
-    else if (unit === 'piece') cost += (qty / 12) * inv.costPrice;
+    cost += getIngredientCostFromRecipeQty(qty, c.unit, inv);
   }
   return cost;
 }
@@ -188,6 +308,10 @@ router.post('/orders', async (req, res, next) => {
       paymentMethod,
       paymentProvider,
       discountAmount = 0,
+      posDiscountReason = '',
+      posDiscountPresetLabel = '',
+      posManualDiscountPercent: posManualDiscountPercentRaw = null,
+      managerDiscountPin,
       customerName = '',
       customerPhone = '',
       deliveryAddress = '',
@@ -228,9 +352,12 @@ router.post('/orders', async (req, res, next) => {
       return res.status(400).json({ message: 'paymentProvider is required when paymentMethod is ONLINE' });
     }
 
-    // Separate regular menu items from deal items (deal items have a "deal-" prefix)
-    const regularItems = items.filter((i) => !String(i.menuItemId).startsWith('deal-'));
-    const dealLineItems = items.filter((i) => String(i.menuItemId).startsWith('deal-'));
+    // Separate regular menu items from deal items.
+    // Deal lines may come as `menuItemId: "deal-<dealId>"` or explicit `dealId`.
+    const isDealLineItem = (line) =>
+      Boolean(line?.dealId) || String(line?.menuItemId || '').startsWith('deal-');
+    const regularItems = items.filter((i) => !isDealLineItem(i));
+    const dealLineItems = items.filter((i) => isDealLineItem(i));
 
     // Fetch regular menu items
     const menuItemIds = regularItems.map((i) => i.menuItemId);
@@ -248,7 +375,9 @@ router.post('/orders', async (req, res, next) => {
     const dealExpandedMenuItems = []; // MenuItem docs from deal expansions (for inventory)
 
     if (dealLineItems.length > 0) {
-      const dealIds = dealLineItems.map((i) => String(i.menuItemId).replace(/^deal-/, ''));
+      const dealIds = dealLineItems.map((i) =>
+        String(i.dealId || i.menuItemId || '').replace(/^deal-/, '')
+      );
       const dbDeals = await Deal.find({
         _id: { $in: dealIds },
         restaurant: req.restaurant._id,
@@ -262,7 +391,7 @@ router.post('/orders', async (req, res, next) => {
       const dealMap = new Map(dbDeals.map((d) => [d._id.toString(), d]));
 
       for (const dealLine of dealLineItems) {
-        const dealId = String(dealLine.menuItemId).replace(/^deal-/, '');
+        const dealId = String(dealLine.dealId || dealLine.menuItemId || '').replace(/^deal-/, '');
         const deal = dealMap.get(dealId);
         const dealQty = Number(dealLine.quantity) || 1;
 
@@ -313,7 +442,7 @@ router.post('/orders', async (req, res, next) => {
 
     // Build order items for regular menu items
     const regularOrderItems = regularItems.map((i) => {
-      const menu = menuMap.get(i.menuItemId);
+      const menu = menuMap.get(String(i.menuItemId));
       const quantity = Number(i.quantity) || 0;
       if (quantity <= 0) throw new Error('Quantity must be greater than zero');
       const lineTotal = menu.price * quantity;
@@ -327,12 +456,59 @@ router.post('/orders', async (req, res, next) => {
       subtotal += lineTotal;
       return { menuItem: menuItem._id, name: menuItem.name, quantity, unitPrice: menuItem.price, lineTotal };
     });
+    const dealItems = dealOrderItems;
+    if (dealItems.length > 0) {
+      console.log('Deal items inventory deduction:', dealItems.map(i => i.name));
+    }
 
     const orderItems = [...regularOrderItems, ...dealOrderItems];
 
-    // Total discount = manual discount from request + auto-savings from deal prices
-    const discount = Math.max(0, (Number(discountAmount) || 0) + dealDiscount);
+    // Total discount: client sends final monetary discount (deals + manual %). Do not add server deal savings again.
+    const discount = Math.min(subtotal, Math.max(0, Number(discountAmount) || 0));
     const foodTotal = Math.max(0, subtotal - discount);
+
+    const manualPctNum =
+      posManualDiscountPercentRaw != null && posManualDiscountPercentRaw !== ''
+        ? Math.min(100, Math.max(0, Number(posManualDiscountPercentRaw)))
+        : null;
+    let posReason = String(posDiscountReason || '').trim();
+    const posPresetLbl = String(posDiscountPresetLabel || '').trim();
+    let storedManualPct = manualPctNum != null && manualPctNum > 0 ? manualPctNum : null;
+
+    if (storedManualPct != null) {
+      const configuredReasons = Array.isArray(req.restaurant?.settings?.posDiscountReasons) &&
+        req.restaurant.settings.posDiscountReasons.length
+        ? req.restaurant.settings.posDiscountReasons
+        : DEFAULT_POS_DISCOUNT_REASONS;
+      const allowedReasonKeys = new Set(configuredReasons.map(normalizeReasonKey));
+      if (!allowedReasonKeys.has(normalizeReasonKey(posReason))) {
+        return res.status(400).json({
+          message: 'Select a discount reason',
+          code: 'DISCOUNT_REASON_REQUIRED',
+        });
+      }
+      const role = req.user.role;
+      const limited =
+        role === 'cashier' || role === 'order_taker' || role === 'delivery_rider' || role === 'kitchen_staff';
+      if (limited && storedManualPct > 20) {
+        const hash = req.restaurant.settings?.posManagerDiscountPinHash;
+        if (!hash) {
+          return res.status(403).json({
+            message: 'Discounts over 20% require a manager PIN to be set in Business settings',
+            code: 'MANAGER_PIN_NOT_CONFIGURED',
+          });
+        }
+        const pin = String(managerDiscountPin || '');
+        if (!pin || !(await bcrypt.compare(pin, hash))) {
+          return res.status(403).json({
+            message: 'Manager PIN required or invalid for this discount',
+            code: 'MANAGER_PIN_REQUIRED',
+          });
+        }
+      }
+    } else {
+      posReason = '';
+    }
 
     const deliveryZones = orderType === 'DELIVERY' ? mergedDeliveryLocations(req.restaurant, branch) : [];
     let deliveryCharges = 0;
@@ -354,15 +530,52 @@ router.post('/orders', async (req, res, next) => {
     const total = foodTotal;
     const amountDue = Math.round((foodTotal + deliveryCharges) * 100) / 100;
 
+    /** Accumulates recipe ingredient cost for the order (same scope through Order.create + COGS post). */
+    let totalIngredientCost = 0;
+
     // Inventory deduction (branch-aware)
+    const inventoryIdsForConsumption = [
+      ...new Set(
+        orderItems.flatMap((orderItem) => {
+          const menu = menuMap.get(orderItem.menuItem.toString());
+          return (menu?.inventoryConsumptions || []).map((c) => c.inventoryItem?.toString?.()).filter(Boolean);
+        })
+      ),
+    ];
+    const inventoryDefsForConsumption = inventoryIdsForConsumption.length
+      ? await InventoryItem.find({
+          _id: { $in: inventoryIdsForConsumption },
+          restaurant: req.restaurant._id,
+        })
+          .select('_id name unit')
+          .lean()
+      : [];
+    const invMetaMap = new Map(
+      inventoryDefsForConsumption.map((d) => [
+        d._id.toString(),
+        { name: d.name || 'Unknown', unit: d.unit || 'piece' },
+      ])
+    );
+
     const consumptionByInventoryId = new Map();
     for (const orderItem of orderItems) {
       const menu = menuMap.get(orderItem.menuItem.toString());
       if (!menu.inventoryConsumptions || menu.inventoryConsumptions.length === 0) continue;
 
       for (const cons of menu.inventoryConsumptions) {
-        const needed = cons.quantity * orderItem.quantity;
         const key = cons.inventoryItem.toString();
+        const needed = convertRecipeQtyToInventoryStockQty(
+          cons.quantity * orderItem.quantity,
+          cons.unit,
+          invMetaMap.get(key)?.unit
+        );
+        console.log('Inventory deduction:', {
+          item: invMetaMap.get(key)?.name || 'Unknown',
+          recipeQty: cons.quantity * orderItem.quantity,
+          recipeUnit: cons.unit,
+          inventoryUnit: invMetaMap.get(key)?.unit,
+          deductedQty: needed,
+        });
         consumptionByInventoryId.set(key, (consumptionByInventoryId.get(key) || 0) + needed);
       }
     }
@@ -447,15 +660,14 @@ router.post('/orders', async (req, res, next) => {
     }
 
     // Compute ingredient cost and profit (sale price - ingredient cost at time of order)
-    let ingredientCost = 0;
     const invIds = Array.from(consumptionByInventoryId.keys());
     if (invIds.length > 0) {
       const itemDefs = await InventoryItem.find({ _id: { $in: invIds }, restaurant: req.restaurant._id })
-        .select('_id unit costPrice')
+        .select('_id name unit costPrice')
         .lean();
       const invCostMap = new Map();
       for (const d of itemDefs) {
-        invCostMap.set(d._id.toString(), { costPrice: d.costPrice || 0, unit: d.unit || 'gram' });
+        invCostMap.set(d._id.toString(), { name: d.name || '', costPrice: d.costPrice || 0, unit: d.unit || 'gram' });
       }
       if (branch) {
         const branchInvRows = await BranchInventory.find({ branch: branch._id, inventoryItem: { $in: invIds } })
@@ -469,10 +681,20 @@ router.post('/orders', async (req, res, next) => {
       for (const orderItem of orderItems) {
         const menu = menuMap.get(orderItem.menuItem.toString());
         if (!menu) continue;
-        ingredientCost += getMenuItemIngredientCost(menu, invCostMap) * orderItem.quantity;
+        totalIngredientCost += getMenuItemIngredientCost(menu, invCostMap) * orderItem.quantity;
       }
     }
+    const ingredientCost = totalIngredientCost;
     const profit = Math.round((foodTotal - ingredientCost) * 100) / 100;
+
+    console.log(
+      '[COGS debug] ingredientCost after compute:',
+      ingredientCost,
+      'consumptionSkus:',
+      invIds.length,
+      'menuLines:',
+      orderItems.length
+    );
 
     const tableNameTrimmed = (tableName || '').trim();
 
@@ -486,7 +708,18 @@ router.post('/orders', async (req, res, next) => {
     if (orderType === 'DINE_IN' && tableNameTrimmed) {
       await Table.findOneAndUpdate(
         { restaurant: req.restaurant._id, branch: branch ? branch._id : null, name: tableNameTrimmed },
-        { $set: { isAvailable: false } }
+        { $set: { isAvailable: false, status: 'occupied' } }
+      );
+      // Advance any active reservation for this table to 'seated'
+      await Reservation.findOneAndUpdate(
+        {
+          restaurant: req.restaurant._id,
+          branch: branch ? branch._id : null,
+          tableNumber: tableNameTrimmed,
+          status: { $in: ['pending', 'confirmed'] },
+        },
+        { $set: { status: 'seated' } },
+        { sort: { date: 1 } }
       );
     }
 
@@ -536,6 +769,9 @@ router.post('/orders', async (req, res, next) => {
       items: orderItems,
       subtotal,
       discountAmount: discount,
+      posDiscountReason: storedManualPct ? posReason : '',
+      posDiscountPresetLabel: storedManualPct ? posPresetLbl : '',
+      posManualDiscountPercent: storedManualPct,
       appliedDeals,
       total,
       ingredientCost,
@@ -550,6 +786,36 @@ router.post('/orders', async (req, res, next) => {
       orderNumber: await generateOrderNumber(req.restaurant._id, branch ? branch._id : null, 'ORD'),
       ...riderFields,
     });
+
+    console.log('ingredientCost value:', ingredientCost, 'orderId:', order._id);
+
+    const totalCOGS = Math.round(ingredientCost * 100) / 100;
+    if (totalCOGS > 0) {
+      console.log('Attempting COGS post for order:', order._id, 'totalCOGS:', totalCOGS);
+      (async () => {
+        try {
+          console.log('Order COGS calculated:', totalCOGS);
+          const { postOrderCogsJournal } = require('../services/accounting/orderCogsPost');
+          const result = await postOrderCogsJournal({
+            tenantId: req.restaurant._id,
+            orderId: order._id,
+            orderNumber: order.orderNumber,
+            totalCOGS,
+            createdBy: req.user.id,
+          });
+          if (result?.success) console.log('COGS journal entry created:', totalCOGS);
+        } catch (err) {
+          console.error('COGS auto-post failed:', err.message);
+        }
+      })();
+    } else {
+      console.log('[COGS] Skipping journal (totalCOGS <= 0)', {
+        orderId: order._id.toString(),
+        orderNumber: order.orderNumber,
+        rawIngredientCost: ingredientCost,
+        consumptionMapSize: consumptionByInventoryId.size,
+      });
+    }
 
     const io = req.app.get('io');
     if (io) {
@@ -603,8 +869,20 @@ router.post('/orders/:id/cancel', async (req, res, next) => {
       const menu = menuMap.get(orderItem.menuItem.toString());
       if (!menu || !menu.inventoryConsumptions || menu.inventoryConsumptions.length === 0) continue;
 
+      const invDefs = await InventoryItem.find({
+        _id: { $in: menu.inventoryConsumptions.map((c) => c.inventoryItem) },
+        restaurant: req.restaurant._id,
+      })
+        .select('_id unit')
+        .lean();
+      const invUnitMap = new Map(invDefs.map((d) => [d._id.toString(), d.unit]));
+
       for (const cons of menu.inventoryConsumptions) {
-        const qty = cons.quantity * orderItem.quantity;
+        const qty = convertRecipeQtyToInventoryStockQty(
+          cons.quantity * orderItem.quantity,
+          cons.unit,
+          invUnitMap.get(cons.inventoryItem.toString())
+        );
         const key = cons.inventoryItem.toString();
         consumptionByInventoryId.set(key, (consumptionByInventoryId.get(key) || 0) + qty);
       }
@@ -650,6 +928,23 @@ router.post('/orders/:id/cancel', async (req, res, next) => {
     if (!order.statusHistory) order.statusHistory = [];
     order.statusHistory.push({ status: 'CANCELLED', at: new Date() });
     await order.save();
+
+    // Free the table and revert any seated reservation back to confirmed
+    if (order.tableName && order.tableName.trim()) {
+      await Table.findOneAndUpdate(
+        { restaurant: order.restaurant, branch: order.branch || null, name: order.tableName.trim() },
+        { $set: { isAvailable: true, status: 'available' } }
+      );
+      await Reservation.findOneAndUpdate(
+        {
+          restaurant: order.restaurant,
+          branch: order.branch || null,
+          tableNumber: order.tableName.trim(),
+          status: 'seated',
+        },
+        { $set: { status: 'confirmed' } }
+      );
+    }
 
     res.json({
       id: order._id,
@@ -1233,8 +1528,20 @@ router.delete('/transactions/:id', async (req, res, next) => {
       const menu = menuMap.get(orderItem.menuItem.toString());
       if (!menu || !menu.inventoryConsumptions || menu.inventoryConsumptions.length === 0) continue;
 
+      const invDefs = await InventoryItem.find({
+        _id: { $in: menu.inventoryConsumptions.map((c) => c.inventoryItem) },
+        restaurant: req.restaurant._id,
+      })
+        .select('_id unit')
+        .lean();
+      const invUnitMap = new Map(invDefs.map((d) => [d._id.toString(), d.unit]));
+
       for (const cons of menu.inventoryConsumptions) {
-        const qty = cons.quantity * orderItem.quantity;
+        const qty = convertRecipeQtyToInventoryStockQty(
+          cons.quantity * orderItem.quantity,
+          cons.unit,
+          invUnitMap.get(cons.inventoryItem.toString())
+        );
         const key = cons.inventoryItem.toString();
         consumptionByInventoryId.set(key, (consumptionByInventoryId.get(key) || 0) + qty);
       }

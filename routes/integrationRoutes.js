@@ -45,6 +45,33 @@ router.get('/', authMiddleware, async (req, res, next) => {
   }
 });
 
+// @route   POST /api/integrations/notify
+// @desc    Record restaurant interest in a coming-soon integration
+router.post('/notify', authMiddleware, async (req, res, next) => {
+  try {
+    const { integrationKey } = req.body;
+    if (!integrationKey || typeof integrationKey !== 'string') {
+      return res.status(400).json({ message: 'integrationKey is required' });
+    }
+    const restaurant = await Restaurant.findById(req.restaurant._id).select('settings website');
+    if (!restaurant) return res.status(404).json({ message: 'Restaurant not found' });
+    if (!restaurant.settings) restaurant.settings = {};
+    const interests = Array.isArray(restaurant.settings.integrationInterests)
+      ? restaurant.settings.integrationInterests
+      : [];
+    if (!interests.includes(integrationKey)) {
+      interests.push(integrationKey);
+      restaurant.settings.integrationInterests = interests;
+      restaurant.markModified('settings');
+      await restaurant.save();
+    }
+    const email = restaurant.website?.contactEmail || req.user?.email || '';
+    return res.json({ ok: true, email });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // @route   POST /api/integrations
 // @desc    Create or update an integration
 router.post('/', authMiddleware, async (req, res, next) => {

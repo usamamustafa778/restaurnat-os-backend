@@ -4,6 +4,32 @@ const Category = require('../models/Category');
 const BranchInventory = require('../models/BranchInventory');
 const InventoryItem = require('../models/InventoryItem');
 
+function normalizeUnit(unit) {
+  const u = String(unit || '').trim().toLowerCase();
+  if (u === 'g' || u === 'gram') return 'gram';
+  if (u === 'kg' || u === 'kilogram') return 'kilogram';
+  if (u === 'ml' || u === 'milliliter') return 'milliliter';
+  if (u === 'l' || u === 'liter') return 'liter';
+  if (u === 'pc' || u === 'pcs' || u === 'piece') return 'piece';
+  if (u === 'dozen') return 'dozen';
+  return u;
+}
+
+function convertToInventoryUnit(recipeQty, recipeUnitRaw, inventoryUnitRaw) {
+  const recipeQtyNum = Number(recipeQty || 0);
+  if (!recipeQtyNum) return 0;
+  const recipeUnit = normalizeUnit(recipeUnitRaw);
+  const inventoryUnit = normalizeUnit(inventoryUnitRaw);
+
+  if (recipeUnit === 'gram' && inventoryUnit === 'kilogram') return recipeQtyNum / 1000;
+  if (recipeUnit === 'kilogram' && inventoryUnit === 'gram') return recipeQtyNum * 1000;
+  if (recipeUnit === 'milliliter' && inventoryUnit === 'liter') return recipeQtyNum / 1000;
+  if (recipeUnit === 'liter' && inventoryUnit === 'milliliter') return recipeQtyNum * 1000;
+  if (recipeUnit === 'piece' && inventoryUnit === 'dozen') return recipeQtyNum / 12;
+  if (recipeUnit === 'dozen' && inventoryUnit === 'piece') return recipeQtyNum * 12;
+  return recipeQtyNum;
+}
+
 /**
  * Get menu items for a specific branch, with branch-specific overrides applied
  * @param {String} restaurantId - Restaurant ID
@@ -61,6 +87,13 @@ async function getBranchMenu(restaurantId, branchId = null, filters = {}) {
   branchInventory.forEach(inv => {
     inventoryMap.set(inv.inventoryItem.toString(), inv);
   });
+  const inventoryDefs = await InventoryItem.find({
+    _id: { $in: branchInventory.map((i) => i.inventoryItem) },
+    restaurant: restaurantId,
+  })
+    .select('_id unit')
+    .lean();
+  const inventoryUnitMap = new Map(inventoryDefs.map((d) => [d._id.toString(), d.unit]));
 
   // Merge base items with branch overrides
   const mergedItems = baseMenuItems
@@ -87,7 +120,7 @@ async function getBranchMenu(restaurantId, branchId = null, filters = {}) {
       
       // Check branch inventory if item has consumptions
       if (item.inventoryConsumptions && item.inventoryConsumptions.length > 0) {
-        const hasStock = checkBranchInventory(item.inventoryConsumptions, inventoryMap);
+        const hasStock = checkBranchInventory(item.inventoryConsumptions, inventoryMap, inventoryUnitMap);
         if (!hasStock) {
           finalAvailable = false;
         }
@@ -217,6 +250,13 @@ async function getBranchMenuItem(menuItemId, branchId = null) {
   branchInventory.forEach(inv => {
     inventoryMap.set(inv.inventoryItem.toString(), inv);
   });
+  const inventoryDefs = await InventoryItem.find({
+    _id: { $in: branchInventory.map((i) => i.inventoryItem) },
+    restaurant: baseItem.restaurant,
+  })
+    .select('_id unit')
+    .lean();
+  const inventoryUnitMap = new Map(inventoryDefs.map((d) => [d._id.toString(), d.unit]));
 
   // If item is NOT available at all branches and there's no override enabling it
   // return null (item doesn't exist at this branch)
@@ -242,7 +282,7 @@ async function getBranchMenuItem(menuItemId, branchId = null) {
 
   // Check inventory
   if (baseItem.inventoryConsumptions && baseItem.inventoryConsumptions.length > 0) {
-    const hasStock = checkBranchInventory(baseItem.inventoryConsumptions, inventoryMap);
+    const hasStock = checkBranchInventory(baseItem.inventoryConsumptions, inventoryMap, inventoryUnitMap);
     if (!hasStock) {
       finalAvailable = false;
     }
@@ -266,7 +306,7 @@ async function getBranchMenuItem(menuItemId, branchId = null) {
  * @param {Map} inventoryMap - Map of inventory items
  * @returns {Boolean} True if enough stock
  */
-function checkBranchInventory(consumptions, inventoryMap) {
+function checkBranchInventory(consumptions, inventoryMap, inventoryUnitMap = new Map()) {
   for (const consumption of consumptions) {
     const invId = consumption.inventoryItem?.toString();
     if (!invId) continue;
@@ -274,7 +314,11 @@ function checkBranchInventory(consumptions, inventoryMap) {
     const inv = inventoryMap.get(invId);
     if (!inv) return false; // No branch inventory record = no stock
     
-    const needed = consumption.quantity || 0;
+    const needed = convertToInventoryUnit(
+      consumption.quantity || 0,
+      consumption.unit,
+      inventoryUnitMap.get(invId)
+    );
     if (needed > 0 && inv.currentStock < needed) {
       return false;
     }

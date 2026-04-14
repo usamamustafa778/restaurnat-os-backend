@@ -29,6 +29,7 @@ const menuRoutes = require('./routes/menuRoutes');
 const contactRoutes = require('./routes/contactRoutes');
 const riderRoutes = require('./routes/riderRoutes');
 const storefrontRoutes = require('./routes/storefrontRoutes');
+const purchaseRoutes = require('./routes/purchaseRoutes');
 const accountingSetupRoutes    = require('./routes/accounting/setup');
 const accountingAccountsRoutes = require('./routes/accounting/accounts');
 const accountingPartiesRoutes  = require('./routes/accounting/parties');
@@ -124,6 +125,7 @@ app.use('/api/menu', menuRoutes);
 app.use('/api', contactRoutes);
 app.use('/api/rider', riderRoutes);
 app.use('/api/storefront', storefrontRoutes);
+app.use('/api/purchase', purchaseRoutes);
 app.use('/api/accounting/setup',    accountingSetupRoutes);
 app.use('/api/accounting',          accountingSetupRoutes);   // exposes /api/accounting/sync-sales
 app.use('/api/accounting/accounts', accountingAccountsRoutes);

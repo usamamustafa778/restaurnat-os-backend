@@ -12,6 +12,11 @@ const inventoryConsumptionSchema = new mongoose.Schema(
       required: true,
       min: 0,
     },
+    unit: {
+      type: String,
+      trim: true,
+      default: 'gram',
+    },
   },
   { _id: false }
 );

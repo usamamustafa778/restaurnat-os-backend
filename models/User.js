@@ -71,6 +71,16 @@ const userSchema = new mongoose.Schema(
     resetPasswordOtpExpires: {
       type: Date,
     },
+    /** Updated on each successful dashboard/API login (staff accounts). */
+    lastLoginAt: {
+      type: Date,
+      default: null,
+    },
+    /** When false, login is rejected until re-enabled by an admin. */
+    isActive: {
+      type: Boolean,
+      default: true,
+    },
   },
   {
     timestamps: true,

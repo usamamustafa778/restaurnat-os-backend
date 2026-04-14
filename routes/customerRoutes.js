@@ -87,6 +87,29 @@ router.get('/menu', async (req, res, next) => {
     }
 
     // Filter out items with insufficient inventory
+    function normalizeUnit(unit) {
+      const u = String(unit || '').trim().toLowerCase();
+      if (u === 'g' || u === 'gram') return 'gram';
+      if (u === 'kg' || u === 'kilogram') return 'kilogram';
+      if (u === 'ml' || u === 'milliliter') return 'milliliter';
+      if (u === 'l' || u === 'liter') return 'liter';
+      if (u === 'pc' || u === 'pcs' || u === 'piece') return 'piece';
+      if (u === 'dozen') return 'dozen';
+      return u;
+    }
+    function convertToInventoryUnit(recipeQty, recipeUnitRaw, inventoryUnitRaw) {
+      const recipeQtyNum = Number(recipeQty || 0);
+      if (!recipeQtyNum) return 0;
+      const recipeUnit = normalizeUnit(recipeUnitRaw);
+      const inventoryUnit = normalizeUnit(inventoryUnitRaw);
+      if (recipeUnit === 'gram' && inventoryUnit === 'kilogram') return recipeQtyNum / 1000;
+      if (recipeUnit === 'kilogram' && inventoryUnit === 'gram') return recipeQtyNum * 1000;
+      if (recipeUnit === 'milliliter' && inventoryUnit === 'liter') return recipeQtyNum / 1000;
+      if (recipeUnit === 'liter' && inventoryUnit === 'milliliter') return recipeQtyNum * 1000;
+      if (recipeUnit === 'piece' && inventoryUnit === 'dozen') return recipeQtyNum / 12;
+      if (recipeUnit === 'dozen' && inventoryUnit === 'piece') return recipeQtyNum * 12;
+      return recipeQtyNum;
+    }
     function hasEnoughInventory(menuItem) {
       if (!menuItem.inventoryConsumptions || menuItem.inventoryConsumptions.length === 0) return true;
       for (const consumption of menuItem.inventoryConsumptions) {
@@ -94,7 +117,7 @@ router.get('/menu', async (req, res, next) => {
         if (!invId) continue;
         const inv = inventoryMap.get(invId);
         if (!inv) continue;
-        const needed = consumption.quantity || 0;
+        const needed = convertToInventoryUnit(consumption.quantity || 0, consumption.unit, inv.unit);
         if (needed > 0 && inv.currentStock < needed) return false;
       }
       return true;

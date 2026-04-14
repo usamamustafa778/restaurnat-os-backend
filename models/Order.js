@@ -188,6 +188,23 @@ const orderSchema = new mongoose.Schema(
       min: 0,
       default: 0,
     },
+    /** POS preset/manual discount reporting (reason required when posManualDiscountPercent > 0) */
+    posDiscountReason: {
+      type: String,
+      default: '',
+      trim: true,
+    },
+    posDiscountPresetLabel: {
+      type: String,
+      default: '',
+      trim: true,
+    },
+    posManualDiscountPercent: {
+      type: Number,
+      default: null,
+      min: 0,
+      max: 100,
+    },
     appliedDeals: [appliedDealSchema],
     customer: {
       type: mongoose.Schema.Types.ObjectId,

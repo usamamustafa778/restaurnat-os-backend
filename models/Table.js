@@ -19,6 +19,21 @@ const tableSchema = new mongoose.Schema(
       required: true,
       trim: true,
     },
+    capacity: {
+      type: Number,
+      default: null,
+      min: 1,
+    },
+    section: {
+      type: String,
+      enum: ['indoor', 'outdoor', 'vip', 'rooftop', null],
+      default: null,
+    },
+    status: {
+      type: String,
+      enum: ['available', 'occupied', 'reserved', 'cleaning'],
+      default: 'available',
+    },
     isAvailable: {
       type: Boolean,
       default: true,

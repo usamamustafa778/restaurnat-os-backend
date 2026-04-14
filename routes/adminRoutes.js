@@ -1,5 +1,6 @@
 const express = require('express');
 const mongoose = require('mongoose');
+const bcrypt = require('bcryptjs');
 const Category = require('../models/Category');
 const MenuItem = require('../models/MenuItem');
 const InventoryItem = require('../models/InventoryItem');
@@ -25,6 +26,39 @@ const { getOrderRooms } = require('../utils/socketRooms');
 const { normalizeEmail, normalizePhone } = require('../utils/storefrontIdentifiers');
 const escapeRegex = require('../utils/escapeRegex');
 const { sanitizeDeliveryLocationsInput } = require('../utils/deliveryLocations');
+
+const DEFAULT_POS_DISCOUNT_PRESETS = [
+  { id: '10', label: '10% Off', percent: 10, cashierAllowed: true },
+  { id: '20', label: '20% Off', percent: 20, cashierAllowed: true },
+  { id: 'staff50', label: 'Staff Meal (50%)', percent: 50, cashierAllowed: false },
+  { id: 'comp100', label: 'Complimentary (100%)', percent: 100, cashierAllowed: false },
+];
+
+const DEFAULT_POS_DISCOUNT_REASONS = [
+  'Customer complaint',
+  'Staff meal',
+  'Loyalty reward',
+  'Manager approval',
+  'Other',
+];
+
+const normalizeReasonKey = (s) => String(s || '').trim().toLowerCase();
+const normalizeDiscountPreset = (p = {}) => {
+  const percent = Math.min(100, Math.max(0, Number(p.percent)));
+  const requiresPin =
+    p.requiresPin !== undefined
+      ? Boolean(p.requiresPin)
+      : p.cashierAllowed !== undefined
+        ? !Boolean(p.cashierAllowed)
+        : percent > 20;
+  return {
+    id: String(p.id || `p-${percent}-${String(p.label || '').slice(0, 8)}`).slice(0, 40),
+    label: String(p.label || '').slice(0, 80),
+    percent,
+    requiresPin,
+    cashierAllowed: !requiresPin,
+  };
+};
 const { checkInventorySufficiency } = require('../utils/checkInventorySufficiency');
 const { autoPostOrder } = require('../services/accounting/autoPost');
 
@@ -698,6 +732,12 @@ const mapCategory = (category) => ({
 
 const mapMenuItem = (item, options) => {
   const invUnitMap = options?.invUnitMap;
+  const suggestRecipeUnit = (invUnitRaw) => {
+    const invUnit = String(invUnitRaw || '').toLowerCase();
+    if (invUnit === 'gram' || invUnit === 'g' || invUnit === 'kg' || invUnit === 'kilogram') return 'gram';
+    if (invUnit === 'ml' || invUnit === 'milliliter' || invUnit === 'liter' || invUnit === 'l') return 'milliliter';
+    return 'piece';
+  };
   return {
   id: item._id.toString(),
   name: item.name,
@@ -714,10 +754,11 @@ const mapMenuItem = (item, options) => {
   dietaryType: item.dietaryType || 'non_veg',
     inventoryConsumptions: (item.inventoryConsumptions || []).map((c) => {
       const invId = c.inventoryItem?.toString?.();
+      const inferredUnit = invUnitMap && invId ? suggestRecipeUnit(invUnitMap.get(invId)) : 'gram';
       return {
         inventoryItem: invId,
-    quantity: c.quantity,
-        ...(invUnitMap && invId ? { unit: invUnitMap.get(invId) || 'gram' } : {}),
+        quantity: c.quantity,
+        unit: c.unit || inferredUnit,
       };
     }),
   };
@@ -733,6 +774,8 @@ const mapUser = (user, branchAssignments) => {
   vehicleType: user.vehicleType || null,
   profileImageUrl: user.profileImageUrl || null,
   createdAt: user.createdAt.toISOString(),
+  lastLoginAt: user.lastLoginAt ? user.lastLoginAt.toISOString() : null,
+  isActive: user.isActive !== false,
   };
   if (branchAssignments) {
     base.branches = branchAssignments.map((a) => ({
@@ -798,8 +841,9 @@ const mapOrder = (order) => {
   const normalizedDeliveryCharges = order.orderType === 'DELIVERY' ? (Number(order.deliveryCharges) || 0) : 0;
   const normalizedGrandTotal = normalizedTotal + normalizedDeliveryCharges;
 
-  return {
+    return {
     id: order.orderNumber || order._id.toString(),
+    orderNumber: order.orderNumber || null,
     _id: order._id.toString(),
     customerName: rawCustomerName,
     orderTakerName,
@@ -814,6 +858,10 @@ const mapOrder = (order) => {
     grandTotal: normalizedGrandTotal,
     subtotal: order.subtotal,
     discountAmount: order.discountAmount || 0,
+    posDiscountReason: order.posDiscountReason || '',
+    posDiscountPresetLabel: order.posDiscountPresetLabel || '',
+    posManualDiscountPercent:
+      order.posManualDiscountPercent != null ? order.posManualDiscountPercent : null,
     status: order.status,
     createdAt: order.createdAt,
     items: (order.items || []).map((i) => ({
@@ -915,7 +963,7 @@ router.get('/menu', async (req, res, next) => {
       }
       for (const inv of inventoryItems) {
         const currentStock = branchStockByInv.get(inv._id.toString()) ?? 0;
-        inventoryMap.set(inv._id.toString(), { name: inv.name, currentStock });
+        inventoryMap.set(inv._id.toString(), { name: inv.name, unit: inv.unit, currentStock });
       }
     } else {
       for (const inv of inventoryItems) {
@@ -1083,7 +1131,20 @@ router.get('/orders/:id', async (req, res, next) => {
 router.put('/orders/:id', async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { items, discountAmount, customerName, customerPhone, deliveryAddress, orderType, tableName, deliveryCharges } = req.body;
+    const {
+      items,
+      discountAmount,
+      customerName,
+      customerPhone,
+      deliveryAddress,
+      orderType,
+      tableName,
+      deliveryCharges,
+      posDiscountReason,
+      posDiscountPresetLabel,
+      posManualDiscountPercent,
+      managerDiscountPin,
+    } = req.body;
     const restaurantId = getRestaurantIdForRequest(req);
 
     let order = null;
@@ -1151,18 +1212,49 @@ router.put('/orders/:id', async (req, res, next) => {
       order.subtotal = subtotal;
       order.discountAmount = discount;
       order.total = total;
+      if (!isOrderTaker && posDiscountReason !== undefined) {
+        order.posDiscountReason = String(posDiscountReason || '').trim();
+      }
+      if (!isOrderTaker && posDiscountPresetLabel !== undefined) {
+        order.posDiscountPresetLabel = String(posDiscountPresetLabel || '').trim();
+      }
+      if (!isOrderTaker && posManualDiscountPercent !== undefined) {
+        const p = Number(posManualDiscountPercent);
+        order.posManualDiscountPercent =
+          posManualDiscountPercent === null || posManualDiscountPercent === ''
+            ? null
+            : Math.min(100, Math.max(0, Number.isFinite(p) ? p : 0));
+      }
     }
 
     if (!isOrderTaker && discountAmount !== undefined && !(Array.isArray(items) && items.length > 0)) {
       order.discountAmount = Math.max(0, Number(discountAmount) || 0);
       order.total = Math.max(0, (order.subtotal || 0) - order.discountAmount);
     }
+    if (!isOrderTaker && posDiscountReason !== undefined) {
+      order.posDiscountReason = String(posDiscountReason || '').trim();
+    }
+    if (!isOrderTaker && posDiscountPresetLabel !== undefined) {
+      order.posDiscountPresetLabel = String(posDiscountPresetLabel || '').trim();
+    }
+    if (!isOrderTaker && posManualDiscountPercent !== undefined) {
+      const p = Number(posManualDiscountPercent);
+      order.posManualDiscountPercent =
+        posManualDiscountPercent === null || posManualDiscountPercent === ''
+          ? null
+          : Math.min(100, Math.max(0, Number.isFinite(p) ? p : 0));
+    }
     if (customerName !== undefined) order.customerName = String(customerName || '').trim();
     if (customerPhone !== undefined) order.customerPhone = String(customerPhone || '').trim();
     if (!isOrderTaker && orderType !== undefined && ['DINE_IN', 'TAKEAWAY', 'DELIVERY'].includes(orderType)) order.orderType = orderType;
     if (tableName !== undefined) order.tableName = String(tableName || '').trim();
-    if (!isOrderTaker && deliveryCharges !== undefined && order.orderType === 'DELIVERY') {
-      order.deliveryCharges = Math.max(0, Number(deliveryCharges) || 0);
+    if (order.orderType === 'DELIVERY') {
+      if (!isOrderTaker && deliveryCharges !== undefined) {
+        order.deliveryCharges = Math.max(0, Number(deliveryCharges) || 0);
+      } else {
+        // Preserve delivery charges when edit payload omits it (common in rider append/edit flows).
+        order.deliveryCharges = Math.max(0, Number(order.deliveryCharges) || 0);
+      }
     }
     if (!isOrderTaker && deliveryAddress !== undefined && order.orderType === 'DELIVERY') {
       order.deliveryAddress = String(deliveryAddress || '').trim();
@@ -1178,6 +1270,47 @@ router.put('/orders/:id', async (req, res, next) => {
 
     // Recalculate grandTotal after all field mutations.
     order.grandTotal = (order.total || 0) + (order.orderType === 'DELIVERY' ? (order.deliveryCharges || 0) : 0);
+
+    const manualPctStored =
+      order.posManualDiscountPercent != null && order.posManualDiscountPercent !== ''
+        ? Math.min(100, Math.max(0, Number(order.posManualDiscountPercent)))
+        : 0;
+    const hasManualPosPct = Number.isFinite(manualPctStored) && manualPctStored > 0;
+    if (!isOrderTaker && hasManualPosPct) {
+      const posReason = String(order.posDiscountReason || '').trim();
+      const configuredReasons = Array.isArray(req.restaurant?.settings?.posDiscountReasons) &&
+        req.restaurant.settings.posDiscountReasons.length
+        ? req.restaurant.settings.posDiscountReasons
+        : DEFAULT_POS_DISCOUNT_REASONS;
+      const allowedReasonKeys = new Set(configuredReasons.map(normalizeReasonKey));
+      if (!allowedReasonKeys.has(normalizeReasonKey(posReason))) {
+        return res.status(400).json({
+          message: 'Select a discount reason',
+          code: 'DISCOUNT_REASON_REQUIRED',
+        });
+      }
+      const limited =
+        req.user.role === 'cashier' ||
+        req.user.role === 'order_taker' ||
+        req.user.role === 'delivery_rider' ||
+        req.user.role === 'kitchen_staff';
+      if (limited && manualPctStored > 20) {
+        const hash = req.restaurant?.settings?.posManagerDiscountPinHash;
+        if (!hash) {
+          return res.status(403).json({
+            message: 'Discounts over 20% require a manager PIN to be set in Business settings',
+            code: 'MANAGER_PIN_NOT_CONFIGURED',
+          });
+        }
+        const pin = String(managerDiscountPin || '');
+        if (!pin || !(await bcrypt.compare(pin, hash))) {
+          return res.status(403).json({
+            message: 'Manager PIN required or invalid for this discount',
+            code: 'MANAGER_PIN_REQUIRED',
+          });
+        }
+      }
+    }
 
     await order.save();
     const updated = await Order.findById(order._id).populate('createdBy', 'name role');
@@ -1318,8 +1451,19 @@ router.put('/orders/:id/status', async (req, res, next) => {
     if ((status === 'DELIVERED' || status === 'CANCELLED' || status === 'OUT_FOR_DELIVERY') && order.tableName && order.tableName.trim()) {
       await Table.findOneAndUpdate(
         { restaurant: order.restaurant, branch: order.branch || null, name: order.tableName.trim() },
-        { $set: { isAvailable: true } }
+        { $set: { isAvailable: true, status: 'available' } }
       );
+      if (status === 'DELIVERED') {
+        await Reservation.findOneAndUpdate(
+          { restaurant: order.restaurant, branch: order.branch || null, tableNumber: order.tableName.trim(), status: 'seated' },
+          { $set: { status: 'completed' } }
+        );
+      } else if (status === 'CANCELLED') {
+        await Reservation.findOneAndUpdate(
+          { restaurant: order.restaurant, branch: order.branch || null, tableNumber: order.tableName.trim(), status: 'seated' },
+          { $set: { status: 'confirmed' } }
+        );
+      }
     }
 
     res.json(mapOrder(order));
@@ -1459,7 +1603,11 @@ router.put('/orders/:id/payment', async (req, res, next) => {
     if (!wasAlreadyDelivered && order.tableName && order.tableName.trim()) {
       await Table.findOneAndUpdate(
         { restaurant: order.restaurant, branch: order.branch || null, name: order.tableName.trim() },
-        { $set: { isAvailable: true } }
+        { $set: { isAvailable: true, status: 'available' } }
+      );
+      await Reservation.findOneAndUpdate(
+        { restaurant: order.restaurant, branch: order.branch || null, tableNumber: order.tableName.trim(), status: 'seated' },
+        { $set: { status: 'completed' } }
       );
     }
 
@@ -1800,16 +1948,29 @@ const normalizeInventoryConsumptions = async (restaurantId, rawConsumptions) => 
     return [];
   }
 
-  // Normalize and merge duplicate inventoryItemIds (sum quantities); only accept valid ObjectId strings
-  const merged = new Map();
+  const VALID_RECIPE_UNITS = new Set(['gram', 'kilogram', 'milliliter', 'liter', 'piece', 'dozen']);
+  const suggestRecipeUnit = (invUnitRaw) => {
+    const invUnit = String(invUnitRaw || '').toLowerCase();
+    if (invUnit === 'gram' || invUnit === 'g' || invUnit === 'kg' || invUnit === 'kilogram') return 'gram';
+    if (invUnit === 'ml' || invUnit === 'milliliter' || invUnit === 'liter' || invUnit === 'l') return 'milliliter';
+    return 'piece';
+  };
+
+  // Normalize rows first; merge duplicates by inventoryItem + recipe unit.
+  const normalizedRows = [];
   for (const c of rawConsumptions) {
     const id = c.inventoryItemId != null ? String(c.inventoryItemId).trim() : '';
     if (!id || !VALID_OBJECTID.test(id)) continue;
     const qty = Number(c.quantity) || 0;
     if (qty <= 0) continue;
-    merged.set(id, (merged.get(id) || 0) + qty);
+    const unit = String(c.unit || '').trim().toLowerCase();
+    normalizedRows.push({
+      id,
+      qty,
+      unit: VALID_RECIPE_UNITS.has(unit) ? unit : null,
+    });
   }
-  const uniqueIds = [...merged.keys()];
+  const uniqueIds = [...new Set(normalizedRows.map((r) => r.id))];
   if (uniqueIds.length === 0) return [];
 
   const inventoryItems = await InventoryItem.find({
@@ -1823,11 +1984,23 @@ const normalizeInventoryConsumptions = async (restaurantId, rawConsumptions) => 
     throw new Error('One or more inventory items are invalid for this restaurant');
   }
 
-  return uniqueIds
-    .map((id) => ({
-      inventoryItem: id,
-      quantity: parseFloat(Number(merged.get(id)).toFixed(6)),
-    }))
+  const invUnitMap = new Map(inventoryItems.map((i) => [i._id.toString(), i.unit]));
+  const merged = new Map();
+  for (const row of normalizedRows) {
+    const recipeUnit = row.unit || suggestRecipeUnit(invUnitMap.get(row.id));
+    const key = `${row.id}|${recipeUnit}`;
+    merged.set(key, (merged.get(key) || 0) + row.qty);
+  }
+
+  return [...merged.entries()]
+    .map(([key, qty]) => {
+      const [inventoryItem, unit] = key.split('|');
+      return {
+        inventoryItem,
+        quantity: parseFloat(Number(qty).toFixed(6)),
+        unit,
+      };
+    })
     .filter((c) => c.quantity > 0);
 };
 
@@ -2618,7 +2791,6 @@ router.get('/website', async (req, res, next) => {
 
     const raw = restaurant.website || {};
     const base = typeof raw.toObject === 'function' ? raw.toObject() : { ...raw };
-    delete base.openingHours;
 
     let merged = { ...base };
 
@@ -2630,6 +2802,7 @@ router.get('/website', async (req, res, next) => {
         'heroSlides',
         'socialMedia',
         'themeColors',
+        'openingHours',
         'openingHoursText',
         'websiteSections',
         'allowWebsiteOrders',
@@ -2855,7 +3028,149 @@ router.get('/settings', async (req, res, next) => {
     if (!restaurant) {
       return res.status(404).json({ message: 'Restaurant not found' });
     }
-    return res.json(restaurant.settings || {});
+    const rawSettings = restaurant.settings || {};
+    const s =
+      typeof rawSettings.toObject === 'function'
+        ? rawSettings.toObject()
+        : { ...rawSettings };
+    delete s.posManagerDiscountPinHash;
+    const presets =
+      Array.isArray(s.posDiscountPresets) && s.posDiscountPresets.length > 0
+        ? s.posDiscountPresets
+        : DEFAULT_POS_DISCOUNT_PRESETS;
+    return res.json({
+      ...s,
+      posDiscountPresets: presets,
+      posDiscountPinConfigured: Boolean(
+        restaurant.settings && restaurant.settings.posManagerDiscountPinHash
+      ),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @route   POST /api/admin/verify-discount-pin
+// @desc    Verify manager discount PIN for high POS discounts
+// @access  Restaurant Admin / Super Admin / Manager / Cashier / Order Taker
+router.post('/verify-discount-pin', async (req, res, next) => {
+  try {
+    const restaurantId = getRestaurantIdForRequest(req);
+    const restaurant = await Restaurant.findById(restaurantId).select('settings');
+    if (!restaurant) {
+      return res.status(404).json({ message: 'Restaurant not found' });
+    }
+    const pin = String(req.body?.pin || '').trim();
+    if (!pin) return res.status(400).json({ valid: false, message: 'PIN is required' });
+    const hash = restaurant.settings?.posManagerDiscountPinHash;
+    if (!hash) {
+      // No PIN configured -> treat as not enforced.
+      return res.json({ valid: true, configured: false });
+    }
+    const valid = await bcrypt.compare(pin, hash);
+    return res.json({ valid, configured: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @route   GET /api/admin/discount-settings
+// @desc    Get POS discount presets/reasons and PIN status
+// @access  Restaurant Admin / Super Admin / Manager / Cashier / Order Taker
+router.get('/discount-settings', async (req, res, next) => {
+  try {
+    const restaurantId = getRestaurantIdForRequest(req);
+    const restaurant = await Restaurant.findById(restaurantId).select('settings');
+    if (!restaurant) return res.status(404).json({ message: 'Restaurant not found' });
+    const settings = restaurant.settings || {};
+    const presets =
+      Array.isArray(settings.posDiscountPresets) && settings.posDiscountPresets.length
+        ? settings.posDiscountPresets.map(normalizeDiscountPreset)
+        : DEFAULT_POS_DISCOUNT_PRESETS.map(normalizeDiscountPreset);
+    const reasons =
+      Array.isArray(settings.posDiscountReasons) && settings.posDiscountReasons.length
+        ? settings.posDiscountReasons
+        : DEFAULT_POS_DISCOUNT_REASONS;
+    console.log('Discount settings response presets:', JSON.stringify(presets, null, 2));
+    return res.json({
+      presets,
+      reasons,
+      pinIsSet: Boolean(settings.posManagerDiscountPinHash),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @route   POST /api/admin/discount-settings
+// @desc    Save POS discount presets/reasons
+// @access  Restaurant Admin / Super Admin / Manager
+router.post('/discount-settings', async (req, res, next) => {
+  try {
+    if (!['restaurant_admin', 'admin', 'super_admin', 'manager'].includes(req.user.role)) {
+      return res.status(403).json({ message: 'Only managers can update discount settings' });
+    }
+    const restaurantId = getRestaurantIdForRequest(req);
+    const restaurant = await Restaurant.findById(restaurantId);
+    if (!restaurant) return res.status(404).json({ message: 'Restaurant not found' });
+    if (!restaurant.settings) restaurant.settings = {};
+
+    const presets = Array.isArray(req.body?.presets) ? req.body.presets : [];
+    const reasons = Array.isArray(req.body?.reasons) ? req.body.reasons : [];
+    console.log('Saving presets:', JSON.stringify(presets, null, 2));
+    const cleanedPresets = presets
+      .filter((p) => p && p.label && Number.isFinite(Number(p.percent)))
+      .map(normalizeDiscountPreset);
+    const cleanedReasons = reasons
+      .map((r) => String(r || '').trim())
+      .filter(Boolean)
+      .slice(0, 20);
+
+    restaurant.settings.posDiscountPresets =
+      cleanedPresets.length > 0 ? cleanedPresets : DEFAULT_POS_DISCOUNT_PRESETS;
+    restaurant.settings.posDiscountReasons =
+      cleanedReasons.length > 0 ? cleanedReasons : DEFAULT_POS_DISCOUNT_REASONS;
+    restaurant.markModified('settings');
+    await restaurant.save();
+
+    return res.json({
+      presets: (restaurant.settings.posDiscountPresets || []).map(
+        normalizeDiscountPreset
+      ),
+      reasons: restaurant.settings.posDiscountReasons,
+      pinIsSet: Boolean(restaurant.settings.posManagerDiscountPinHash),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @route   POST /api/admin/discount-pin
+// @desc    Set or clear manager discount PIN
+// @access  Restaurant Admin / Super Admin / Manager
+router.post('/discount-pin', async (req, res, next) => {
+  try {
+    if (!['restaurant_admin', 'admin', 'super_admin', 'manager'].includes(req.user.role)) {
+      return res.status(403).json({ message: 'Only managers can update discount PIN' });
+    }
+    const restaurantId = getRestaurantIdForRequest(req);
+    const restaurant = await Restaurant.findById(restaurantId);
+    if (!restaurant) return res.status(404).json({ message: 'Restaurant not found' });
+    if (!restaurant.settings) restaurant.settings = {};
+
+    const clear = req.body?.clear === true;
+    const pin = String(req.body?.pin || '').trim();
+    if (clear) {
+      restaurant.settings.posManagerDiscountPinHash = '';
+    } else {
+      if (!pin || pin.length < 4 || pin.length > 6 || !/^\d+$/.test(pin)) {
+        return res.status(400).json({ message: 'PIN must be 4-6 digits' });
+      }
+      restaurant.settings.posManagerDiscountPinHash = await bcrypt.hash(pin, 10);
+    }
+    restaurant.markModified('settings');
+    await restaurant.save();
+    return res.json({ pinIsSet: Boolean(restaurant.settings.posManagerDiscountPinHash) });
   } catch (error) {
     next(error);
   }
@@ -2883,6 +3198,9 @@ router.put('/settings', async (req, res, next) => {
       billFooterMessage,
       currencyCode,
       currencyDenominations,
+      posDiscountPresets,
+      posManagerDiscountPin,
+      posManagerDiscountPinClear,
     } = req.body;
 
     if (typeof allowOrderWhenOutOfStock === 'boolean') {
@@ -2916,10 +3234,42 @@ router.put('/settings', async (req, res, next) => {
       ).sort((a, b) => b - a);
     }
 
+    if (posManagerDiscountPinClear === true) {
+      restaurant.settings.posManagerDiscountPinHash = '';
+    } else if (typeof posManagerDiscountPin === 'string' && posManagerDiscountPin.trim()) {
+      if (!['restaurant_admin', 'admin', 'super_admin', 'manager'].includes(req.user.role)) {
+        return res.status(403).json({ message: 'Only managers can set the discount PIN' });
+      }
+      restaurant.settings.posManagerDiscountPinHash = await bcrypt.hash(
+        posManagerDiscountPin.trim(),
+        10
+      );
+    }
+
+    if (Array.isArray(posDiscountPresets)) {
+      const cleaned = posDiscountPresets
+        .filter((p) => p && p.label && Number.isFinite(Number(p.percent)))
+        .map(normalizeDiscountPreset);
+      restaurant.settings.posDiscountPresets = cleaned;
+    }
+
     // Mongoose won't detect nested-object mutations without this
     restaurant.markModified('settings');
     await restaurant.save();
-    return res.json(restaurant.settings);
+    const out =
+      typeof restaurant.settings.toObject === 'function'
+        ? restaurant.settings.toObject()
+        : { ...restaurant.settings };
+    delete out.posManagerDiscountPinHash;
+    const presetsOut =
+      Array.isArray(out.posDiscountPresets) && out.posDiscountPresets.length > 0
+        ? out.posDiscountPresets.map(normalizeDiscountPreset)
+        : DEFAULT_POS_DISCOUNT_PRESETS.map(normalizeDiscountPreset);
+    return res.json({
+      ...out,
+      posDiscountPresets: presetsOut,
+      posDiscountPinConfigured: Boolean(restaurant.settings.posManagerDiscountPinHash),
+    });
   } catch (error) {
     next(error);
   }
@@ -2945,6 +3295,7 @@ router.put('/website', async (req, res, next) => {
       socialMedia,
       themeColors,
       openingHoursText,
+      openingHours,
       websiteSections,
       allowWebsiteOrders,
       deliveryLocations,
@@ -3078,6 +3429,7 @@ router.put('/website', async (req, res, next) => {
       'heroSlides',
       'socialMedia',
       'themeColors',
+      'openingHours',
       'openingHoursText',
       'websiteSections',
       'allowWebsiteOrders',
@@ -3103,18 +3455,14 @@ router.put('/website', async (req, res, next) => {
       if (branchId && overrides) {
         overrides[key] = value;
       } else {
-        if (key === 'openingHoursText') {
-          restaurant.website.openingHoursText = value;
-          restaurant.website.openingHours = {};
-        } else {
-          restaurant.website[key] = value;
-        }
+        restaurant.website[key] = value;
       }
     };
 
     assignField('heroSlides', heroSlides);
     assignField('socialMedia', socialMedia);
     assignField('themeColors', themeColors);
+    assignField('openingHours', openingHours);
     assignField('openingHoursText', openingHoursText);
     assignField('websiteSections', websiteSections);
     assignField('allowWebsiteOrders', typeof allowWebsiteOrders === 'boolean' ? allowWebsiteOrders : undefined);
@@ -3132,7 +3480,6 @@ router.put('/website', async (req, res, next) => {
     // Return merged config for this branch (or global if no branch)
     const raw = restaurant.website || {};
     const base = typeof raw.toObject === 'function' ? raw.toObject() : { ...raw };
-    delete base.openingHours;
 
     let merged = { ...base };
     if (branchId && overrides) {
@@ -3615,6 +3962,121 @@ router.get('/reports/sales', async (req, res, next) => {
     };
 
     res.json(payload);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @route   GET /api/admin/reports/discounts
+// @desc    Discount totals by reason, staff, and day (paid closed orders)
+// @access  Tenant admin / manager / cashier (same as sales report)
+router.get('/reports/discounts', async (req, res, next) => {
+  try {
+    const restaurantId = getRestaurantIdForRequest(req);
+    const branchId = getBranchIdForRequest(req);
+    const { from, to, daySessionId: daySessionIdRaw } = req.query;
+    let fromDate = from ? new Date(from) : new Date(Date.now() - 30 * 86400000);
+    let toDate = to ? new Date(to) : new Date();
+    const daySessionId =
+      daySessionIdRaw && mongoose.Types.ObjectId.isValid(String(daySessionIdRaw))
+        ? String(daySessionIdRaw)
+        : null;
+
+    const match = {
+      restaurant: restaurantId,
+      discountAmount: { $gt: 0 },
+      status: { $in: ['DELIVERED', 'COMPLETED'] },
+    };
+    let sessionScoped = false;
+    if (daySessionId) {
+      const ds = await DaySession.findOne({
+        _id: daySessionId,
+        restaurant: restaurantId,
+      })
+        .select('startAt endAt')
+        .lean();
+      if (ds?.startAt) {
+        match.daySession = new mongoose.Types.ObjectId(daySessionId);
+        sessionScoped = true;
+        fromDate = new Date(ds.startAt);
+        toDate = ds.endAt ? new Date(ds.endAt) : new Date();
+      }
+    }
+    if (!sessionScoped) {
+      if (Number.isNaN(fromDate.getTime()) || Number.isNaN(toDate.getTime())) {
+        return res.status(400).json({ message: 'Invalid from or to date' });
+      }
+      match.createdAt = { $gte: fromDate, $lte: toDate };
+    }
+    if (branchId) {
+      match.$or = [{ branch: branchId }, { branch: null }];
+    }
+
+    const orders = await Order.find(match)
+      .select('discountAmount posDiscountReason posDiscountPresetLabel posManualDiscountPercent createdBy createdAt orderNumber')
+      .lean();
+
+    const paidOrders = orders.filter((o) => isOrderPaid(o));
+    let totalDiscount = 0;
+    const byReason = {};
+    const byStaff = {};
+    const byDay = {};
+
+    for (const o of paidOrders) {
+      const amt = Number(o.discountAmount) || 0;
+      totalDiscount += amt;
+      const reason = (o.posDiscountReason && String(o.posDiscountReason).trim()) || '(no reason recorded)';
+      byReason[reason] = byReason[reason] || { count: 0, total: 0 };
+      byReason[reason].count += 1;
+      byReason[reason].total += amt;
+
+      const sid = o.createdBy ? String(o.createdBy) : 'unknown';
+      byStaff[sid] = byStaff[sid] || { staffId: sid, name: '', count: 0, total: 0 };
+      byStaff[sid].count += 1;
+      byStaff[sid].total += amt;
+
+      const d = o.createdAt ? new Date(o.createdAt).toISOString().slice(0, 10) : 'unknown';
+      byDay[d] = byDay[d] || { day: d, total: 0, count: 0 };
+      byDay[d].total += amt;
+      byDay[d].count += 1;
+    }
+
+    const staffIds = Object.keys(byStaff).filter((id) => id && id !== 'unknown');
+    const users = staffIds.length
+      ? await User.find({ _id: { $in: staffIds } })
+          .select('name')
+          .lean()
+      : [];
+    const nameMap = new Map(users.map((u) => [u._id.toString(), u.name || '']));
+
+    const byReasonArr = Object.entries(byReason).map(([reason, v]) => ({
+      reason,
+      count: v.count,
+      total: Math.round(v.total * 100) / 100,
+    })).sort((a, b) => b.total - a.total);
+
+    const byStaffArr = Object.values(byStaff).map((row) => ({
+      ...row,
+      name: nameMap.get(row.staffId) || row.name || 'Unknown',
+      total: Math.round(row.total * 100) / 100,
+    })).sort((a, b) => b.total - a.total);
+
+    const byDayArr = Object.values(byDay)
+      .map((row) => ({
+        ...row,
+        total: Math.round(row.total * 100) / 100,
+      }))
+      .sort((a, b) => a.day.localeCompare(b.day));
+
+    res.json({
+      from: fromDate.toISOString(),
+      to: toDate.toISOString(),
+      orderCount: paidOrders.length,
+      totalDiscount: Math.round(totalDiscount * 100) / 100,
+      byReason: byReasonArr,
+      byStaff: byStaffArr,
+      byDay: byDayArr,
+    });
   } catch (error) {
     next(error);
   }
@@ -4199,6 +4661,7 @@ router.post('/users', async (req, res, next) => {
       phone: phone ? phone.trim() : '',
       vehicleType: vehicleType || null,
       restaurant: restaurantId,
+      isActive: req.body.isActive === false ? false : true,
     });
 
     // Create branch assignments if provided
@@ -4217,6 +4680,49 @@ router.post('/users', async (req, res, next) => {
     }
 
     res.status(201).json(mapUser(user, assignments));
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @route   GET /api/admin/users/:id/stats
+// @desc    Orders created by this user today / this week (calendar week, Mon–Sun)
+// @access  Restaurant Admin / Super Admin / Manager
+router.get('/users/:id/stats', async (req, res, next) => {
+  try {
+    const restaurantId = getRestaurantIdForRequest(req);
+    const { id } = req.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({ message: 'Invalid user id' });
+    }
+    const user = await User.findOne({ _id: id, restaurant: restaurantId }).select('_id role').lean();
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    const trackRoles = ['cashier', 'order_taker'];
+    if (!trackRoles.includes(user.role)) {
+      return res.json({ ordersToday: 0, ordersThisWeek: 0 });
+    }
+    const now = new Date();
+    const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const dow = now.getDay();
+    const diff = dow === 0 ? -6 : 1 - dow;
+    const startOfWeek = new Date(now);
+    startOfWeek.setDate(now.getDate() + diff);
+    startOfWeek.setHours(0, 0, 0, 0);
+    const [ordersToday, ordersThisWeek] = await Promise.all([
+      Order.countDocuments({
+        restaurant: restaurantId,
+        createdBy: user._id,
+        createdAt: { $gte: startOfDay },
+      }),
+      Order.countDocuments({
+        restaurant: restaurantId,
+        createdBy: user._id,
+        createdAt: { $gte: startOfWeek },
+      }),
+    ]);
+    res.json({ ordersToday, ordersThisWeek });
   } catch (error) {
     next(error);
   }
@@ -4267,6 +4773,14 @@ router.put('/users/:id', async (req, res, next) => {
     }
     if (req.body.vehicleType !== undefined) {
       user.vehicleType = req.body.vehicleType || null;
+    }
+    if (req.body.isActive !== undefined) {
+      const nextActive = Boolean(req.body.isActive);
+      const requesterId = req.user.id || req.user._id?.toString?.();
+      if (!nextActive && requesterId === user._id.toString()) {
+        return res.status(400).json({ message: 'You cannot deactivate your own account' });
+      }
+      user.isActive = nextActive;
     }
 
     await user.save();
@@ -4825,8 +5339,19 @@ router.put('/kitchen/orders/:id/status', async (req, res, next) => {
     if ((status === 'DELIVERED' || status === 'CANCELLED') && order.tableName && order.tableName.trim()) {
       await Table.findOneAndUpdate(
         { restaurant: order.restaurant, branch: order.branch || null, name: order.tableName.trim() },
-        { $set: { isAvailable: true } }
+        { $set: { isAvailable: true, status: 'available' } }
       );
+      if (status === 'DELIVERED') {
+        await Reservation.findOneAndUpdate(
+          { restaurant: order.restaurant, branch: order.branch || null, tableNumber: order.tableName.trim(), status: 'seated' },
+          { $set: { status: 'completed' } }
+        );
+      } else if (status === 'CANCELLED') {
+        await Reservation.findOneAndUpdate(
+          { restaurant: order.restaurant, branch: order.branch || null, tableNumber: order.tableName.trim(), status: 'seated' },
+          { $set: { status: 'confirmed' } }
+        );
+      }
     }
 
     res.json({
@@ -4841,13 +5366,19 @@ router.put('/kitchen/orders/:id/status', async (req, res, next) => {
 
 // TABLE MANAGEMENT ROUTES (simple: name + isAvailable)
 
-const mapTable = (table) => ({
-  id: table._id.toString(),
-  name: table.name || '',
-  isAvailable: table.isAvailable !== false,
-  branchId: table.branch ? table.branch.toString() : null,
-  createdAt: table.createdAt?.toISOString?.(),
-});
+const mapTable = (table) => {
+  const derivedStatus = table.status || (table.isAvailable !== false ? 'available' : 'occupied');
+  return {
+    id: table._id.toString(),
+    name: table.name || '',
+    capacity: table.capacity ?? null,
+    section: table.section || null,
+    status: derivedStatus,
+    isAvailable: derivedStatus === 'available',
+    branchId: table.branch ? table.branch.toString() : null,
+    createdAt: table.createdAt?.toISOString?.(),
+  };
+};
 
 // @route   GET /api/admin/tables
 // @desc    List tables (scoped by x-branch-id when set)
@@ -4874,7 +5405,7 @@ router.post('/tables', async (req, res, next) => {
   try {
     const restaurantId = getRestaurantIdForRequest(req);
     const branchId = getBranchIdForRequest(req);
-    const { name } = req.body;
+    const { name, capacity } = req.body;
 
     if (!name || !String(name).trim()) {
       return res.status(400).json({ message: 'Table name is required' });
@@ -4890,10 +5421,19 @@ router.post('/tables', async (req, res, next) => {
       return res.status(400).json({ message: 'A table with this name already exists for this branch' });
     }
 
+    const parsedCapacity = capacity !== undefined && capacity !== null && capacity !== '' ? parseInt(capacity, 10) : null;
+    if (parsedCapacity !== null && (isNaN(parsedCapacity) || parsedCapacity < 1)) {
+      return res.status(400).json({ message: 'Capacity must be a positive number' });
+    }
+
+    const sectionVal = req.body.section || null;
     const table = await Table.create({
       restaurant: restaurantId,
       branch: branchId || null,
       name: trimmedName,
+      capacity: parsedCapacity,
+      section: sectionVal,
+      status: 'available',
       isAvailable: true,
     });
 
@@ -4914,7 +5454,7 @@ router.put('/tables/:id', async (req, res, next) => {
       return res.status(404).json({ message: 'Table not found' });
     }
 
-    const { name, isAvailable } = req.body;
+    const { name, isAvailable, capacity, status, section } = req.body;
     if (name !== undefined) {
       const trimmed = String(name).trim();
       if (!trimmed) {
@@ -4933,7 +5473,23 @@ router.put('/tables/:id', async (req, res, next) => {
         table.name = trimmed;
       }
     }
-    if (typeof isAvailable === 'boolean') table.isAvailable = isAvailable;
+    if (status !== undefined && ['available', 'occupied', 'reserved', 'cleaning'].includes(status)) {
+      table.status = status;
+      table.isAvailable = status === 'available';
+    } else if (typeof isAvailable === 'boolean') {
+      table.isAvailable = isAvailable;
+      table.status = isAvailable ? 'available' : 'occupied';
+    }
+    if (capacity !== undefined) {
+      const parsedCapacity = capacity !== null && capacity !== '' ? parseInt(capacity, 10) : null;
+      if (parsedCapacity !== null && (isNaN(parsedCapacity) || parsedCapacity < 1)) {
+        return res.status(400).json({ message: 'Capacity must be a positive number' });
+      }
+      table.capacity = parsedCapacity;
+    }
+    if (section !== undefined) {
+      table.section = section || null;
+    }
 
     await table.save();
     res.json(mapTable(table));
@@ -4988,7 +5544,7 @@ router.get('/reservations', async (req, res, next) => {
     const query = { restaurant: restaurantId };
     if (branchId) query.branch = branchId;
 
-    // Optional date filter
+    // Optional date / range filter
     if (req.query.date) {
       const filterDate = new Date(req.query.date);
       const startOfDay = new Date(filterDate);
@@ -4996,6 +5552,14 @@ router.get('/reservations', async (req, res, next) => {
       const endOfDay = new Date(filterDate);
       endOfDay.setHours(23, 59, 59, 999);
       query.date = { $gte: startOfDay, $lte: endOfDay };
+    } else if (req.query.from || req.query.to) {
+      query.date = {};
+      if (req.query.from) query.date.$gte = new Date(req.query.from);
+      if (req.query.to) {
+        const toDate = new Date(req.query.to);
+        toDate.setHours(23, 59, 59, 999);
+        query.date.$lte = toDate;
+      }
     }
 
     const reservations = await Reservation.find(query).sort({ date: 1, time: 1 }).lean();

@@ -4,8 +4,6 @@
 
 const mongoose = require('mongoose');
 
-const MAX_ZONES = 40;
-
 function normalizeDbList(raw) {
   if (!Array.isArray(raw)) return [];
   return raw
@@ -19,7 +17,6 @@ function normalizeDbList(raw) {
     }))
     .filter((l) => l.name.length > 0)
     .sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name))
-    .slice(0, MAX_ZONES)
     .map((l, idx) => ({ ...l, sortOrder: idx }));
 }
 
@@ -46,7 +43,6 @@ function sanitizeDeliveryLocationsInput(raw) {
     })
     .filter((x) => x.name.length > 0)
     .sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name))
-    .slice(0, MAX_ZONES)
     .map((x, idx) => ({ _id: x._id, name: x.name, fee: x.fee, sortOrder: idx }));
 }
 
@@ -88,5 +84,4 @@ module.exports = {
   pickDeliveryLocation,
   publicDeliveryZones,
   normalizeDbList,
-  MAX_ZONES,
 };
