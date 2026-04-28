@@ -115,6 +115,120 @@ router.post('/', async (req, res) => {
   }
 });
 
+// ── Known 3-digit group accounts to auto-create if missing during migration ───
+const GROUP_DEFAULTS = {
+  '101': { name: 'Partners Capital',          type: 'capital'   },
+  '102': { name: 'Drawings',                 type: 'capital'   },
+  '103': { name: 'Retained Earnings',        type: 'capital'   },
+  '201': { name: 'Suppliers',                type: 'liability' },
+  '202': { name: 'Other Payable',            type: 'liability' },
+  '203': { name: 'Tax Payable',              type: 'liability' },
+  '301': { name: 'Cash In Hand',             type: 'asset'     },
+  '302': { name: 'Bank Balances',            type: 'asset'     },
+  '303': { name: 'Digital Accounts',         type: 'asset'     },
+  '304': { name: 'Accounts Receivable',      type: 'asset'     },
+  '305': { name: 'Inventory',               type: 'asset'     },
+  '306': { name: 'Advances and Deposits',   type: 'asset'     },
+  '307': { name: 'Fixed Assets',            type: 'asset'     },
+  '308': { name: 'Accumulated Depreciation', type: 'asset'    },
+  '401': { name: 'Sales',                   type: 'revenue'   },
+  '402': { name: 'Other Revenue',           type: 'revenue'   },
+  '501': { name: 'Cost of Goods',           type: 'cogs'      },
+  '502': { name: 'Other COGS',              type: 'cogs'      },
+  '601': { name: 'Operating Expenses',      type: 'expense'   },
+  '602': { name: 'Other Expenses',          type: 'expense'   },
+};
+
+// Stale names that must be corrected in existing data (old name → correct name)
+// Keyed by account code so the match is unambiguous.
+const NAME_CORRECTIONS = {
+  '301': 'Cash In Hand',
+  '302': 'Bank Balances',
+  '303': 'Digital Accounts',
+  '201': 'Suppliers',
+};
+
+// POST /api/accounting/accounts/migrate-parents
+// Idempotent: finds child accounts (code > 3 digits) with no parentId,
+// creates any missing 3-digit group accounts, then sets parentId on orphans.
+router.post('/migrate-parents', async (req, res) => {
+  try {
+    const restaurant = await resolveTenant(req, res);
+    if (!restaurant) return;
+
+    const tenantId = restaurant._id;
+    const allAccounts = await Account.find({ tenantId }).lean();
+
+    // Build mutable code → _id map
+    const codeToId = {};
+    allAccounts.forEach((a) => { codeToId[a.code] = String(a._id); });
+
+    // Find leaf accounts (code length > 3) that still have no parentId
+    const orphans = allAccounts.filter((a) => a.code.length > 3 && !a.parentId);
+
+    if (orphans.length === 0) {
+      return res.json({ success: true, fixed: 0, created: 0, message: 'Nothing to migrate' });
+    }
+
+    let created = 0;
+    let fixed   = 0;
+    let renamed = 0;
+
+    // ── Step 1: correct stale parent account names ────────────────────
+    for (const [code, correctName] of Object.entries(NAME_CORRECTIONS)) {
+      const result = await Account.updateOne(
+        { tenantId, code, name: { $ne: correctName } },
+        { $set: { name: correctName } },
+      );
+      if (result.modifiedCount > 0) renamed++;
+    }
+
+    // ── Step 2: set parentId on orphaned child accounts ───────────────
+    for (const acc of orphans) {
+      // Derive the expected parent code (first 3 digits)
+      const parentCode = acc.code.substring(0, 3);
+      let parentId = codeToId[parentCode];
+
+      // Create the group account if it does not exist yet
+      if (!parentId) {
+        const def = GROUP_DEFAULTS[parentCode];
+        if (!def) continue; // unknown prefix — skip safely
+
+        try {
+          const newGroup = await Account.create({
+            tenantId,
+            code: parentCode,
+            name: def.name,
+            type: def.type,
+            isSystem: true,
+            parentId: null,
+          });
+          codeToId[parentCode] = String(newGroup._id);
+          parentId = codeToId[parentCode];
+          created++;
+        } catch (dupErr) {
+          // Race condition: another request just created it — fetch and continue
+          const existing = await Account.findOne({ tenantId, code: parentCode }).lean();
+          if (existing) {
+            codeToId[parentCode] = String(existing._id);
+            parentId = codeToId[parentCode];
+          } else {
+            continue;
+          }
+        }
+      }
+
+      await Account.updateOne({ _id: acc._id, tenantId }, { $set: { parentId } });
+      fixed++;
+    }
+
+    return res.json({ success: true, fixed, created, renamed });
+  } catch (err) {
+    console.error('migrate-parents error:', err);
+    return res.status(500).json({ message: err.message || 'Migration failed' });
+  }
+});
+
 // PATCH /api/accounting/accounts/:id
 router.patch('/:id', async (req, res) => {
   try {

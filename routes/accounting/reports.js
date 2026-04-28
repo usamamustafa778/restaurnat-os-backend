@@ -213,6 +213,10 @@ router.get('/day-book', async (req, res) => {
 });
 
 // ─── GET /api/accounting/reports/payables ────────────────────────────────────
+// Party Payable Analysis format:
+//   O. Payable | Purchases | Cash Paid | Cheque Issued | Payable (closing)
+//
+// Backward compat: asOfDate still accepted (treated as dateTo with epoch start).
 
 router.get('/payables', async (req, res) => {
   try {
@@ -220,73 +224,152 @@ router.get('/payables', async (req, res) => {
     if (!restaurant) return;
     const tenantId = restaurant._id;
 
-    const asOfDate = req.query.asOfDate || new Date().toISOString().split('T')[0];
-    const asOf = new Date(asOfDate); asOf.setHours(23, 59, 59, 999);
+    const { dateFrom, dateTo, asOfDate } = req.query;
 
-    const suppliers = await Party.find({ tenantId, type: 'supplier', isActive: true }).lean();
-    if (!suppliers.length) return res.json({ asOfDate, suppliers: [], totalPayable: 0 });
+    let dateStart, dateEnd, fromParam, toParam;
 
-    const supplierIds = suppliers.map((s) => s._id);
+    if (dateFrom && dateTo) {
+      dateStart = new Date(dateFrom); dateStart.setHours(0, 0, 0, 0);
+      dateEnd   = new Date(dateTo);   dateEnd.setHours(23, 59, 59, 999);
+      fromParam = dateFrom;
+      toParam   = dateTo;
+    } else if (asOfDate) {
+      // Legacy single-date mode
+      dateStart = new Date('2000-01-01'); dateStart.setHours(0, 0, 0, 0);
+      dateEnd   = new Date(asOfDate);    dateEnd.setHours(23, 59, 59, 999);
+      fromParam = '2000-01-01';
+      toParam   = asOfDate;
+    } else {
+      return res.status(400).json({ message: 'dateFrom and dateTo are required' });
+    }
 
-    const ledgerBalances = await JournalEntry.aggregate([
-      {
-        $match: {
-          tenantId: new mongoose.Types.ObjectId(tenantId),
-          partyId:  { $in: supplierIds.map((id) => new mongoose.Types.ObjectId(id)) },
-          date:     { $lte: asOf },
+    const suppliers = await Party.find({ tenantId, type: 'supplier', isActive: true })
+      .sort({ name: 1 })
+      .lean();
+
+    const EMPTY_TOTALS = { openingPayable: 0, purchases: 0, cashPaid: 0, chequeIssued: 0, payable: 0 };
+    if (!suppliers.length) {
+      return res.json({ dateFrom: fromParam, dateTo: toParam, suppliers: [], totals: EMPTY_TOTALS, totalPayable: 0 });
+    }
+
+    const tenantOid    = new mongoose.Types.ObjectId(tenantId);
+    const supplierOids = suppliers.map((s) => new mongoose.Types.ObjectId(s._id));
+
+    // Parallel aggregations — opening (before period) + period breakdown
+    const [openingRows, periodRows] = await Promise.all([
+      JournalEntry.aggregate([
+        {
+          $match: {
+            tenantId: tenantOid,
+            partyId:  { $in: supplierOids },
+            date:     { $lt: dateStart },
+          },
         },
-      },
-      {
-        $group: {
-          _id:         '$partyId',
-          totalDebit:  { $sum: '$debit' },
-          totalCredit: { $sum: '$credit' },
+        {
+          $group: {
+            _id: '$partyId',
+            dr:  { $sum: '$debit' },
+            cr:  { $sum: '$credit' },
+          },
         },
-      },
+      ]),
+      JournalEntry.aggregate([
+        {
+          $match: {
+            tenantId: tenantOid,
+            partyId:  { $in: supplierOids },
+            date:     { $gte: dateStart, $lte: dateEnd },
+          },
+        },
+        {
+          $group: {
+            _id: '$partyId',
+            // Purchases = credit entries from non-payment vouchers (GRN / JV)
+            purchases: {
+              $sum: {
+                $cond: [
+                  {
+                    $and: [
+                      { $gt: ['$credit', 0] },
+                      {
+                        $not: {
+                          $in: [
+                            '$voucherType',
+                            ['cash_payment', 'bank_payment', 'card_transfer',
+                             'cash_receipt', 'bank_receipt'],
+                          ],
+                        },
+                      },
+                    ],
+                  },
+                  '$credit',
+                  0,
+                ],
+              },
+            },
+            // Cash Paid = debit entries on cash_payment vouchers
+            cashPaid: {
+              $sum: { $cond: [{ $eq: ['$voucherType', 'cash_payment'] }, '$debit', 0] },
+            },
+            // Cheque Issued = debit entries on bank_payment vouchers
+            chequeIssued: {
+              $sum: { $cond: [{ $eq: ['$voucherType', 'bank_payment'] }, '$debit', 0] },
+            },
+          },
+        },
+      ]),
     ]);
 
-    const lastPaymentRows = await JournalEntry.aggregate([
-      {
-        $match: {
-          tenantId: new mongoose.Types.ObjectId(tenantId),
-          partyId: { $in: supplierIds.map((id) => new mongoose.Types.ObjectId(id)) },
-          date: { $lte: asOf },
-        },
-      },
-      {
-        $group: {
-          _id: '$partyId',
-          lastPaymentDate: { $max: '$date' },
-        },
-      },
-    ]);
+    const openMap   = Object.fromEntries(openingRows.map((r) => [String(r._id), r]));
+    const periodMap = Object.fromEntries(periodRows.map((r) => [String(r._id), r]));
 
-    const balanceMap = Object.fromEntries(
-      ledgerBalances.map((b) => [b._id.toString(), b])
-    );
-    const lastPaymentMap = Object.fromEntries(
-      lastPaymentRows.map((r) => [r._id.toString(), r.lastPaymentDate])
-    );
+    const totals = { ...EMPTY_TOTALS };
+    let seq = 0;
 
     const result = suppliers
       .map((s) => {
-        const b = balanceMap[s._id.toString()] || { totalDebit: 0, totalCredit: 0 };
-        // For payables: credit > debit means we owe them
-        const balance = s.openingBalance + b.totalCredit - b.totalDebit;
-        const creditLimit = Number(s.creditLimit) || 0;
+        const sid    = String(s._id);
+        const open   = openMap[sid]   || { dr: 0, cr: 0 };
+        const period = periodMap[sid] || { purchases: 0, cashPaid: 0, chequeIssued: 0 };
+
+        // Supplier is credit-normal; openingPayable = opening credit surplus + stored opening balance
+        const openingPayable  = (s.openingBalance || 0) + ((open.cr || 0) - (open.dr || 0));
+        const purchases       = period.purchases    || 0;
+        const cashPaid        = period.cashPaid     || 0;
+        const chequeIssued    = period.chequeIssued || 0;
+        const payable         = openingPayable + purchases - cashPaid - chequeIssued;
+
+        totals.openingPayable += openingPayable;
+        totals.purchases      += purchases;
+        totals.cashPaid       += cashPaid;
+        totals.chequeIssued   += chequeIssued;
+        totals.payable        += payable;
+
         return {
-          ...s,
-          balance,
-          lastPaymentDate: lastPaymentMap[s._id.toString()] || null,
-          overdue: balance > creditLimit && creditLimit > 0,
+          _id:           s._id,
+          code:          ++seq,
+          name:          s.name,
+          phone:         s.phone  || '',
+          city:          s.city   || '',
+          openingPayable,
+          purchases,
+          cashPaid,
+          chequeIssued,
+          payable,
         };
       })
-      .filter((s) => s.balance > 0.01)
-      .sort((a, b) => b.balance - a.balance);
+      .filter((s) =>
+        s.openingPayable !== 0 || s.purchases !== 0 ||
+        s.cashPaid !== 0 || s.chequeIssued !== 0 || s.payable !== 0,
+      );
 
-    const totalPayable = result.reduce((sum, r) => sum + r.balance, 0);
-
-    return res.json({ asOfDate, suppliers: result, totalPayable });
+    return res.json({
+      dateFrom:     fromParam,
+      dateTo:       toParam,
+      suppliers:    result,
+      totals,
+      totalPayable: totals.payable,       // keep legacy field
+    });
   } catch (err) {
     console.error('Payables report error:', err);
     return res.status(500).json({ message: err.message || 'Failed to generate payables report' });
@@ -640,6 +723,360 @@ router.get('/balance-sheet', async (req, res) => {
   } catch (err) {
     console.error('Balance sheet error:', err);
     return res.status(500).json({ message: err.message || 'Failed to generate balance sheet' });
+  }
+});
+
+// ─── GET /api/accounting/reports/receivables ─────────────────────────────────
+// Party Receivable Analysis (mirror of Payables but for customers):
+//   O. Rec | Activity | Cash Rec | Bank Rec | Receivable (closing)
+//
+// Customers are debit-normal:
+//   openingRec = party.openingBalance + (openingDr - openingCr)
+//   activity   = debit entries from non-receipt vouchers (sales / JV)
+//   cashRec    = credit entries from cash_receipt vouchers
+//   bankRec    = credit entries from bank_receipt vouchers
+//   receivable = openingRec + activity - cashRec - bankRec
+
+router.get('/receivables', async (req, res) => {
+  try {
+    const restaurant = await resolveTenant(req, res);
+    if (!restaurant) return;
+    const tenantId = restaurant._id;
+
+    const { dateFrom, dateTo } = req.query;
+    if (!dateFrom || !dateTo) {
+      return res.status(400).json({ message: 'dateFrom and dateTo are required' });
+    }
+
+    const dateStart = new Date(dateFrom); dateStart.setHours(0, 0, 0, 0);
+    const dateEnd   = new Date(dateTo);   dateEnd.setHours(23, 59, 59, 999);
+
+    const customers = await Party.find({ tenantId, type: 'customer', isActive: true })
+      .sort({ name: 1 })
+      .lean();
+
+    const EMPTY_TOTALS = { openingRec: 0, activity: 0, cashRec: 0, bankRec: 0, receivable: 0 };
+    if (!customers.length) {
+      return res.json({ dateFrom, dateTo, customers: [], totals: EMPTY_TOTALS });
+    }
+
+    const tenantOid    = new mongoose.Types.ObjectId(tenantId);
+    const customerOids = customers.map((c) => new mongoose.Types.ObjectId(c._id));
+
+    const [openingRows, periodRows] = await Promise.all([
+      // Opening: all entries before dateFrom
+      JournalEntry.aggregate([
+        {
+          $match: {
+            tenantId: tenantOid,
+            partyId:  { $in: customerOids },
+            date:     { $lt: dateStart },
+          },
+        },
+        {
+          $group: {
+            _id: '$partyId',
+            dr:  { $sum: '$debit' },
+            cr:  { $sum: '$credit' },
+          },
+        },
+      ]),
+      // Period: entries in date range, split by voucher type
+      JournalEntry.aggregate([
+        {
+          $match: {
+            tenantId: tenantOid,
+            partyId:  { $in: customerOids },
+            date:     { $gte: dateStart, $lte: dateEnd },
+          },
+        },
+        {
+          $group: {
+            _id: '$partyId',
+            // Activity = new receivables (debit entries from non-receipt vouchers: sales / JV)
+            activity: {
+              $sum: {
+                $cond: [
+                  {
+                    $and: [
+                      { $gt: ['$debit', 0] },
+                      {
+                        $not: {
+                          $in: [
+                            '$voucherType',
+                            ['cash_receipt', 'bank_receipt', 'card_transfer',
+                             'cash_payment', 'bank_payment'],
+                          ],
+                        },
+                      },
+                    ],
+                  },
+                  '$debit',
+                  0,
+                ],
+              },
+            },
+            // Cash Rec = credit entries on cash_receipt vouchers
+            cashRec: {
+              $sum: { $cond: [{ $eq: ['$voucherType', 'cash_receipt'] }, '$credit', 0] },
+            },
+            // Bank Rec = credit entries on bank_receipt vouchers
+            bankRec: {
+              $sum: { $cond: [{ $eq: ['$voucherType', 'bank_receipt'] }, '$credit', 0] },
+            },
+          },
+        },
+      ]),
+    ]);
+
+    const openMap   = Object.fromEntries(openingRows.map((r) => [String(r._id), r]));
+    const periodMap = Object.fromEntries(periodRows.map((r) => [String(r._id), r]));
+
+    const totals = { ...EMPTY_TOTALS };
+    let seq = 0;
+
+    const result = customers
+      .map((c) => {
+        const cid    = String(c._id);
+        const open   = openMap[cid]   || { dr: 0, cr: 0 };
+        const period = periodMap[cid] || { activity: 0, cashRec: 0, bankRec: 0 };
+
+        // Customer is debit-normal; openingRec = opening debit surplus + stored opening balance
+        const openingRec = (c.openingBalance || 0) + ((open.dr || 0) - (open.cr || 0));
+        const activity   = period.activity || 0;
+        const cashRec    = period.cashRec  || 0;
+        const bankRec    = period.bankRec  || 0;
+        const receivable = openingRec + activity - cashRec - bankRec;
+
+        totals.openingRec += openingRec;
+        totals.activity   += activity;
+        totals.cashRec    += cashRec;
+        totals.bankRec    += bankRec;
+        totals.receivable += receivable;
+
+        return {
+          _id:        c._id,
+          code:       ++seq,
+          name:       c.name,
+          phone:      c.phone || '',
+          city:       c.city  || '',
+          openingRec,
+          activity,
+          cashRec,
+          bankRec,
+          receivable,
+        };
+      })
+      .filter((c) =>
+        c.openingRec !== 0 || c.activity !== 0 ||
+        c.cashRec !== 0    || c.bankRec !== 0  || c.receivable !== 0,
+      );
+
+    return res.json({ dateFrom, dateTo, customers: result, totals });
+  } catch (err) {
+    console.error('Receivables report error:', err);
+    return res.status(500).json({ message: err.message || 'Failed to generate receivables report' });
+  }
+});
+
+// ─── GET /api/accounting/reports/trial-balance ───────────────────────────────
+
+router.get('/trial-balance', async (req, res) => {
+  try {
+    const restaurant = await resolveTenant(req, res);
+    if (!restaurant) return;
+    const tenantId = restaurant._id;
+
+    const { dateFrom, dateTo } = req.query;
+    if (!dateFrom || !dateTo) {
+      return res.status(400).json({ message: 'dateFrom and dateTo are required' });
+    }
+
+    const dateStart = new Date(dateFrom); dateStart.setHours(0, 0, 0, 0);
+    const dateEnd   = new Date(dateTo);   dateEnd.setHours(23, 59, 59, 999);
+
+    // Net Dr/Cr into one-side presentation (standard trial balance rule)
+    function netSide(dr, cr) {
+      const net = (dr || 0) - (cr || 0);
+      return net >= 0 ? { dr: net, cr: 0 } : { dr: 0, cr: -net };
+    }
+
+    const tenantOid = new mongoose.Types.ObjectId(tenantId);
+
+    // Run both aggregations in parallel
+    const [openingRows, periodRows] = await Promise.all([
+      JournalEntry.aggregate([
+        { $match: { tenantId: tenantOid, date: { $lt: dateStart } } },
+        {
+          $group: {
+            _id: {
+              accountId: '$accountId',
+              partyId:   { $ifNull: ['$partyId', null] },
+            },
+            dr:          { $sum: '$debit' },
+            cr:          { $sum: '$credit' },
+            accountName: { $first: '$accountName' },
+            accountCode: { $first: '$accountCode' },
+            partyName:   { $first: '$partyName' },
+          },
+        },
+      ]),
+      JournalEntry.aggregate([
+        { $match: { tenantId: tenantOid, date: { $gte: dateStart, $lte: dateEnd } } },
+        {
+          $group: {
+            _id: {
+              accountId: '$accountId',
+              partyId:   { $ifNull: ['$partyId', null] },
+            },
+            dr:          { $sum: '$debit' },
+            cr:          { $sum: '$credit' },
+            accountName: { $first: '$accountName' },
+            accountCode: { $first: '$accountCode' },
+            partyName:   { $first: '$partyName' },
+          },
+        },
+      ]),
+    ]);
+
+    // Merge opening + period into a single map keyed by accountId::partyId
+    const rowMap = new Map();
+    const key = (accountId, partyId) => `${accountId}::${partyId ?? 'null'}`;
+
+    for (const r of openingRows) {
+      const k = key(r._id.accountId, r._id.partyId);
+      rowMap.set(k, {
+        accountId:   r._id.accountId,
+        partyId:     r._id.partyId,
+        accountName: r.accountName,
+        accountCode: r.accountCode,
+        partyName:   r.partyName,
+        openDr:  r.dr,
+        openCr:  r.cr,
+        periodDr: 0,
+        periodCr: 0,
+      });
+    }
+
+    for (const r of periodRows) {
+      const k = key(r._id.accountId, r._id.partyId);
+      if (rowMap.has(k)) {
+        rowMap.get(k).periodDr = r.dr;
+        rowMap.get(k).periodCr = r.cr;
+      } else {
+        rowMap.set(k, {
+          accountId:   r._id.accountId,
+          partyId:     r._id.partyId,
+          accountName: r.accountName,
+          accountCode: r.accountCode,
+          partyName:   r.partyName,
+          openDr:  0,
+          openCr:  0,
+          periodDr: r.dr,
+          periodCr: r.cr,
+        });
+      }
+    }
+
+    // Fetch full account list (for ordering + type grouping)
+    const accounts = await Account.find({ tenantId, isActive: true }).sort({ code: 1 }).lean();
+    const accountMap = Object.fromEntries(accounts.map((a) => [String(a._id), a]));
+
+    // Build per-account aggregates (sum all party rows back into the account)
+    const accAgg = new Map(); // accountId → { rawOpenDr, rawOpenCr, rawPeriodDr, rawPeriodCr, parties[] }
+
+    for (const [, row] of rowMap) {
+      const accId = String(row.accountId);
+      if (!accountMap[accId]) continue; // orphan entry — skip
+
+      if (!accAgg.has(accId)) {
+        accAgg.set(accId, { rawOpenDr: 0, rawOpenCr: 0, rawPeriodDr: 0, rawPeriodCr: 0, parties: [] });
+      }
+
+      const agg = accAgg.get(accId);
+      agg.rawOpenDr   += row.openDr;
+      agg.rawOpenCr   += row.openCr;
+      agg.rawPeriodDr += row.periodDr;
+      agg.rawPeriodCr += row.periodCr;
+
+      if (row.partyId) {
+        const os = netSide(row.openDr, row.openCr);
+        const ps = netSide(row.periodDr, row.periodCr);
+        const cs = netSide(row.openDr + row.periodDr, row.openCr + row.periodCr);
+        agg.parties.push({
+          partyId:   String(row.partyId),
+          partyName: row.partyName || '—',
+          openingDr: os.dr, openingCr: os.cr,
+          periodDr:  ps.dr, periodCr:  ps.cr,
+          closingDr: cs.dr, closingCr: cs.cr,
+        });
+      }
+    }
+
+    const TYPE_ORDER  = ['capital', 'liability', 'asset', 'revenue', 'cogs', 'expense'];
+    const TYPE_LABELS = {
+      capital:   'Capital',
+      liability: 'Liabilities',
+      asset:     'Assets',
+      revenue:   'Revenue',
+      cogs:      'Cost of Goods Sold',
+      expense:   'Expenses',
+    };
+
+    const ZERO6 = { openingDr: 0, openingCr: 0, periodDr: 0, periodCr: 0, closingDr: 0, closingCr: 0 };
+    const addTo = (target, src) => {
+      target.openingDr += src.openingDr;
+      target.openingCr += src.openingCr;
+      target.periodDr  += src.periodDr;
+      target.periodCr  += src.periodCr;
+      target.closingDr += src.closingDr;
+      target.closingCr += src.closingCr;
+    };
+
+    const grandTotal = { ...ZERO6 };
+
+    const groups = TYPE_ORDER
+      .map((type) => {
+        const typeAccs = accounts.filter((a) => a.type === type);
+        const subtotal = { ...ZERO6 };
+
+        const accountRows = typeAccs
+          .map((a) => {
+            const agg = accAgg.get(String(a._id));
+            const rawODr  = agg?.rawOpenDr   || 0;
+            const rawOCr  = agg?.rawOpenCr   || 0;
+            const rawPDr  = agg?.rawPeriodDr || 0;
+            const rawPCr  = agg?.rawPeriodCr || 0;
+
+            const os = netSide(rawODr, rawOCr);
+            const ps = netSide(rawPDr, rawPCr);
+            const cs = netSide(rawODr + rawPDr, rawOCr + rawPCr);
+
+            return {
+              accountId:   String(a._id),
+              accountCode: a.code,
+              accountName: a.name,
+              openingDr: os.dr, openingCr: os.cr,
+              periodDr:  ps.dr, periodCr:  ps.cr,
+              closingDr: cs.dr, closingCr: cs.cr,
+              parties: agg?.parties || [],
+            };
+          })
+          .filter((a) =>
+            a.openingDr || a.openingCr || a.periodDr || a.periodCr || a.closingDr || a.closingCr,
+          );
+
+        accountRows.forEach((a) => addTo(subtotal, a));
+        addTo(grandTotal, subtotal);
+
+        return { type, label: TYPE_LABELS[type], accounts: accountRows, subtotal };
+      })
+      .filter((g) => g.accounts.length > 0);
+
+    return res.json({ dateFrom, dateTo, groups, grandTotal });
+  } catch (err) {
+    console.error('Trial balance error:', err);
+    return res.status(500).json({ message: err.message || 'Failed to generate trial balance' });
   }
 });
 

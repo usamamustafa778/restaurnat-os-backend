@@ -15,64 +15,80 @@ const VOUCHER_TYPES = [
   'card_transfer',
 ];
 
+// ─── Chart of Accounts definition ────────────────────────────────────────────
+// Rules:
+//   • 3-digit codes   = GROUP accounts (parent = null)
+//   • 5-digit codes   = LEAF accounts  (parentCode = their 3-digit group)
+// parentCode is stripped before DB insert; parentId is resolved after insertMany.
+
 const COA = [
-  // CAPITAL
-  { code: '101', name: 'Partners Capital', type: 'capital', isSystem: true },
-  { code: '102', name: 'Owner Drawings', type: 'capital', isSystem: true },
-  { code: '103', name: 'Retained Earnings', type: 'capital', isSystem: true },
-  // LIABILITIES - parents
-  { code: '201', name: 'Accounts Payable', type: 'liability', isSystem: true },
-  { code: '202', name: 'Accrued Liabilities', type: 'liability', isSystem: true },
-  { code: '203', name: 'Other Payable', type: 'liability', isSystem: true },
-  { code: '204', name: 'Due to Director', type: 'liability', isSystem: true },
-  { code: '205', name: 'Tax Payable', type: 'liability', isSystem: true },
-  // LIABILITIES - children
-  { code: '20101', name: 'Suppliers Payable', type: 'liability', isSystem: true, parentCode: '201' },
-  // ASSETS - parents
-  { code: '301', name: 'Cash Accounts', type: 'asset', isSystem: true },
-  { code: '302', name: 'Bank Accounts', type: 'asset', isSystem: true },
-  { code: '303', name: 'Digital Wallets', type: 'asset', isSystem: true },
-  { code: '304', name: 'Accounts Receivable', type: 'asset', isSystem: true },
-  { code: '305', name: 'Inventory', type: 'asset', isSystem: true },
-  { code: '306', name: 'Advances and Deposits', type: 'asset', isSystem: true },
-  { code: '307', name: 'Fixed Assets', type: 'asset', isSystem: true },
+  // ── CAPITAL ────────────────────────────────────────────────────────────────
+  { code: '101', name: 'Partners Capital',   type: 'capital',   isSystem: true },
+  { code: '102', name: 'Drawings',           type: 'capital',   isSystem: true },
+  { code: '103', name: 'Retained Earnings',  type: 'capital',   isSystem: true },
+  { code: '10101', name: 'Owner Capital',    type: 'capital',   isSystem: true, parentCode: '101' },
+  { code: '10201', name: 'Owner Drawings',   type: 'capital',   isSystem: true, parentCode: '102' },
+
+  // ── LIABILITIES ────────────────────────────────────────────────────────────
+  { code: '201', name: 'Suppliers',          type: 'liability', isSystem: true },
+  { code: '202', name: 'Other Payable',      type: 'liability', isSystem: true },
+  { code: '203', name: 'Tax Payable',        type: 'liability', isSystem: true },
+  { code: '20101', name: 'Suppliers Payable',  type: 'liability', isSystem: true, parentCode: '201' },
+  { code: '20201', name: 'Due to Director',    type: 'liability', isSystem: true, parentCode: '202' },
+  { code: '20202', name: 'Accrued Liabilities',type: 'liability', isSystem: true, parentCode: '202' },
+
+  // ── ASSETS ─────────────────────────────────────────────────────────────────
+  { code: '301', name: 'Cash In Hand',            type: 'asset', isSystem: true },
+  { code: '302', name: 'Bank Balances',          type: 'asset', isSystem: true },
+  { code: '303', name: 'Digital Accounts',       type: 'asset', isSystem: true },
+  { code: '304', name: 'Accounts Receivable',    type: 'asset', isSystem: true },
+  { code: '305', name: 'Inventory',              type: 'asset', isSystem: true },
+  { code: '306', name: 'Advances and Deposits',  type: 'asset', isSystem: true },
+  { code: '307', name: 'Fixed Assets',           type: 'asset', isSystem: true },
   { code: '308', name: 'Accumulated Depreciation', type: 'asset', isSystem: true },
-  // ASSETS - children
-  { code: '30101', name: 'Cash in Hand', type: 'asset', isSystem: true, parentCode: '301' },
-  { code: '30102', name: 'Petty Cash', type: 'asset', isSystem: true, parentCode: '301' },
-  { code: '30201', name: 'Main Bank Account', type: 'asset', isSystem: true, parentCode: '302' },
-  { code: '30301', name: 'Easypaisa', type: 'asset', isSystem: true, parentCode: '303' },
-  { code: '30302', name: 'JazzCash', type: 'asset', isSystem: true, parentCode: '303' },
-  { code: '30501', name: 'Raw Materials', type: 'asset', isSystem: true, parentCode: '305' },
-  { code: '30502', name: 'Packing Materials', type: 'asset', isSystem: true, parentCode: '305' },
-  { code: '30503', name: 'Finished Goods', type: 'asset', isSystem: true, parentCode: '305' },
+  { code: '30101', name: 'Cash in Hand',        type: 'asset', isSystem: true, parentCode: '301' },
+  { code: '30102', name: 'Petty Cash',          type: 'asset', isSystem: true, parentCode: '301' },
+  { code: '30201', name: 'Main Bank Account',   type: 'asset', isSystem: true, parentCode: '302' },
+  { code: '30301', name: 'Easypaisa',           type: 'asset', isSystem: true, parentCode: '303' },
+  { code: '30302', name: 'JazzCash',            type: 'asset', isSystem: true, parentCode: '303' },
+  { code: '30501', name: 'Raw Materials',       type: 'asset', isSystem: true, parentCode: '305' },
+  { code: '30502', name: 'Packing Materials',   type: 'asset', isSystem: true, parentCode: '305' },
+  { code: '30503', name: 'Finished Goods',      type: 'asset', isSystem: true, parentCode: '305' },
   { code: '30701', name: 'Furniture and Fixtures', type: 'asset', isSystem: true, parentCode: '307' },
-  { code: '30702', name: 'Kitchen Equipment', type: 'asset', isSystem: true, parentCode: '307' },
-  { code: '30703', name: 'IT Equipment', type: 'asset', isSystem: true, parentCode: '307' },
-  // REVENUE
-  { code: '401', name: 'Food Sales', type: 'revenue', isSystem: true },
-  { code: '402', name: 'Delivery Sales', type: 'revenue', isSystem: true },
-  { code: '403', name: 'Dine-in Sales', type: 'revenue', isSystem: true },
-  { code: '404', name: 'Catering Sales', type: 'revenue', isSystem: true },
-  { code: '405', name: 'Discounts Given', type: 'revenue', isSystem: true },
-  // COGS
-  { code: '501', name: 'Food Cost', type: 'cogs', isSystem: true },
-  { code: '502', name: 'Packaging Cost', type: 'cogs', isSystem: true },
-  // EXPENSES
-  { code: '601', name: 'Staff Salaries', type: 'expense', isSystem: true },
-  { code: '602', name: 'Rider Allowances', type: 'expense', isSystem: true },
-  { code: '603', name: 'Rent', type: 'expense', isSystem: true },
-  { code: '604', name: 'Electricity Bill', type: 'expense', isSystem: true },
-  { code: '605', name: 'Gas Bill', type: 'expense', isSystem: true },
-  { code: '606', name: 'Water Bill', type: 'expense', isSystem: true },
-  { code: '607', name: 'Easypaisa and JazzCash Fees', type: 'expense', isSystem: true },
-  { code: '608', name: 'Foodpanda Commission', type: 'expense', isSystem: true },
-  { code: '609', name: 'Maintenance and Repairs', type: 'expense', isSystem: true },
-  { code: '610', name: 'Printing and Stationery', type: 'expense', isSystem: true },
-  { code: '611', name: 'Marketing and Advertising', type: 'expense', isSystem: true },
-  { code: '612', name: 'Mobile and Internet', type: 'expense', isSystem: true },
-  { code: '613', name: 'Depreciation Expense', type: 'expense', isSystem: true },
-  { code: '614', name: 'Miscellaneous Expense', type: 'expense', isSystem: true },
+  { code: '30702', name: 'Kitchen Equipment',   type: 'asset', isSystem: true, parentCode: '307' },
+  { code: '30703', name: 'IT Equipment',        type: 'asset', isSystem: true, parentCode: '307' },
+
+  // ── REVENUE ────────────────────────────────────────────────────────────────
+  { code: '401', name: 'Sales',            type: 'revenue', isSystem: true },
+  { code: '402', name: 'Other Revenue',    type: 'revenue', isSystem: true },
+  { code: '40101', name: 'Dine-in Sales',  type: 'revenue', isSystem: true, parentCode: '401' },
+  { code: '40102', name: 'Takeaway Sales', type: 'revenue', isSystem: true, parentCode: '401' },
+  { code: '40103', name: 'Delivery Sales', type: 'revenue', isSystem: true, parentCode: '401' },
+  { code: '40104', name: 'Online Sales',   type: 'revenue', isSystem: true, parentCode: '401' },
+  { code: '40201', name: 'Catering Sales', type: 'revenue', isSystem: true, parentCode: '402' },
+
+  // ── COGS ───────────────────────────────────────────────────────────────────
+  { code: '501', name: 'Cost of Goods',     type: 'cogs', isSystem: true },
+  { code: '502', name: 'Other COGS',        type: 'cogs', isSystem: true },
+  { code: '50101', name: 'Food Cost',       type: 'cogs', isSystem: true, parentCode: '501' },
+  { code: '50201', name: 'Packaging Cost',  type: 'cogs', isSystem: true, parentCode: '502' },
+
+  // ── EXPENSES ───────────────────────────────────────────────────────────────
+  { code: '601', name: 'Operating Expenses',         type: 'expense', isSystem: true },
+  { code: '602', name: 'Other Expenses',             type: 'expense', isSystem: true },
+  { code: '60101', name: 'Salaries',                 type: 'expense', isSystem: true, parentCode: '601' },
+  { code: '60102', name: 'Rent',                     type: 'expense', isSystem: true, parentCode: '601' },
+  { code: '60103', name: 'Utilities',                type: 'expense', isSystem: true, parentCode: '601' },
+  { code: '60104', name: 'Rider Payouts',            type: 'expense', isSystem: true, parentCode: '601' },
+  { code: '60105', name: 'Discounts Given',          type: 'expense', isSystem: true, parentCode: '601' },
+  { code: '60201', name: 'Easypaisa / JazzCash Fees', type: 'expense', isSystem: true, parentCode: '602' },
+  { code: '60202', name: 'Foodpanda Commission',     type: 'expense', isSystem: true, parentCode: '602' },
+  { code: '60203', name: 'Marketing and Advertising',type: 'expense', isSystem: true, parentCode: '602' },
+  { code: '60204', name: 'Maintenance and Repairs',  type: 'expense', isSystem: true, parentCode: '602' },
+  { code: '60205', name: 'Mobile and Internet',      type: 'expense', isSystem: true, parentCode: '602' },
+  { code: '60206', name: 'Printing and Stationery',  type: 'expense', isSystem: true, parentCode: '602' },
+  { code: '60207', name: 'Depreciation Expense',     type: 'expense', isSystem: true, parentCode: '602' },
+  { code: '60208', name: 'Miscellaneous Expense',    type: 'expense', isSystem: true, parentCode: '602' },
 ];
 
 // Resolve tenant restaurant from the request (mirrors the admin routes pattern)
@@ -170,6 +186,49 @@ router.post(
         // ignore rollback error
       }
       return res.status(500).json({ message: 'Setup failed', error: err.message });
+    }
+  }
+);
+
+// POST /api/accounting/migrate-account-names
+// One-time idempotent migration: corrects stale parent account names in the tenant's COA.
+// Safe to call multiple times — uses $ne guards so no-op when already correct.
+router.post(
+  '/migrate-account-names',
+  protect,
+  requireRole('restaurant_admin', 'super_admin', 'admin', 'manager'),
+  async (req, res) => {
+    try {
+      const restaurant = await resolveTenant(req, res);
+      if (!restaurant) return;
+      const tenantId = restaurant._id;
+
+      // Each entry: oldNames (array of stale names to match) → correctName
+      const RENAMES = [
+        { oldNames: ['Cash Accounts'],                             correctName: 'Cash In Hand'     },
+        { oldNames: ['Accounts Payable', 'Accounts Payable Group'], correctName: 'Suppliers'       },
+        { oldNames: ['Bank Accounts'],                             correctName: 'Bank Balances'    },
+        { oldNames: ['Digital Wallets'],                           correctName: 'Digital Accounts' },
+      ];
+
+      let totalRenamed = 0;
+      const details = [];
+
+      for (const { oldNames, correctName } of RENAMES) {
+        const result = await Account.updateMany(
+          { tenantId, name: { $in: oldNames } },
+          { $set: { name: correctName } },
+        );
+        if (result.modifiedCount > 0) {
+          totalRenamed += result.modifiedCount;
+          details.push({ correctName, count: result.modifiedCount });
+        }
+      }
+
+      return res.json({ success: true, totalRenamed, details });
+    } catch (err) {
+      console.error('migrate-account-names error:', err);
+      return res.status(500).json({ message: err.message || 'Migration failed' });
     }
   }
 );
